@@ -1,0 +1,16 @@
+.gradle
+build
+.idea/
+.project
+.settings/
+.classpath
+nbactions.xml
+nb-configuration.xml
+nbproject/
+*.class
+
+# run-dev.bat saves the test server address here
+dev-server-url.txt
+
+# package-tester.bat puts the tester zips here
+dist/
