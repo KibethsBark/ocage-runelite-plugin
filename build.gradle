@@ -30,8 +30,9 @@ dependencies {
 group = 'cc.ocage'
 version = '1.0.0'
 
-// Which bot API a build talks to. The Plugin Hub builds with no arguments, so
-// a Hub release always uses production. A test build bakes in the test server
+// Which bot API a build talks to. The Plugin Hub replaces this file with its
+// own (build=standard), which never fills the address in, so a Hub release
+// always uses production. A test build bakes in the test server
 // instead:  ./gradlew run -PocageApiUrl=https://<test-server>  (or shadowJar).
 // Nothing overrides it at run time — see ApiUrl.java.
 def ocageApiUrl = project.findProperty('ocageApiUrl') ?: 'https://api.ocage.cc'

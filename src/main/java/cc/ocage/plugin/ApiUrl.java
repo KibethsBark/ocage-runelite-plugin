@@ -8,8 +8,9 @@ import lombok.extern.slf4j.Slf4j;
  * Which Ocage bot API this client talks to: the address baked in at build
  * time ({@code ./gradlew run -PocageApiUrl=...} or {@code shadowJar
  * -PocageApiUrl=...}, for the test server), else production,
- * {@link #PRODUCTION}. A Plugin Hub build passes no build property, so every
- * Hub release uses production, and nothing on the player's PC (an
+ * {@link #PRODUCTION}. The Plugin Hub builds with its own build.gradle
+ * ({@code build=standard}), which leaves the address unfilled, so every Hub
+ * release uses production, and nothing on the player's PC (an
  * environment variable, a Java property) can point it anywhere else.
  * A key only works on the server that issued it, so each server keeps its own
  * key (see {@link OcagePlugin#keyName()}).
