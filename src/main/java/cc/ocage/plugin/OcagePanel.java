@@ -14,7 +14,8 @@ import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.GridLayout;
 import java.awt.RenderingHints;
-import java.net.URL;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -33,6 +34,7 @@ import javax.swing.JTextField;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.PluginPanel;
 
@@ -48,6 +50,7 @@ import net.runelite.client.ui.PluginPanel;
  * right edge. Every row is left-aligned: a vertical BoxLayout otherwise
  * centres panels and left-aligns labels, pushing text off to one side.</p>
  */
+@Slf4j
 class OcagePanel extends PluginPanel
 {
 	private final OcagePlugin plugin;
@@ -156,10 +159,19 @@ class OcagePanel extends PluginPanel
 	private static JLabel banner()
 	{
 		JLabel label = new JLabel();
-		URL gif = OcagePanel.class.getResource("banner.gif");
+		byte[] gif = null;
+		// getResourceAsStream, not getResource: a Hub plugin runs from its jar (Plugin Hub README).
+		try (InputStream in = OcagePanel.class.getResourceAsStream("banner.gif"))
+		{
+			gif = in == null ? null : in.readAllBytes();
+		}
+		catch (IOException e)
+		{
+			log.debug("Couldn't load the Ocage banner", e);
+		}
 		if (gif != null)
 		{
-			// ImageIcon from a URL keeps a GIF animated.
+			// ImageIcon from the bytes keeps a GIF animated.
 			label.setIcon(new ImageIcon(gif));
 		}
 		else

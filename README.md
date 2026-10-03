@@ -28,7 +28,7 @@ Outside a clan event, kills aren't sent. Drops are only sent when the clan's rul
 |---|---|
 | Show counted drops | A chat message when a kill or drop counts for an event, or you reach a new Combat Achievements tier |
 | Show bingo overlay | The event overlay during a bingo. Screenshots of bingo drops always include it |
-| Screenshot bingo drops | Off: bingo drops are still submitted, without a picture |
+| Screenshot bingo drops | Off by default. On: a bingo drop is submitted with a screenshot of your game screen as its proof. Off: it's still submitted, without a picture |
 | Bingo standing updates | A chat message when your team's points or rank change |
 | Screenshot chat | What bingo screenshots hide: private messages (the default), the whole chat box, or nothing |
 
@@ -40,10 +40,10 @@ Everything goes to the Ocage clan's server at `api.ocage.cc`, which is run by th
 - the boss and kill count of kills while an event is running;
 - the drops, pets and collection-log items described above, with their value;
 - your Combat Achievements tier;
-- during a bingo, screenshots of your game screen for drops on the bingo's item list (can be turned off);
+- during a bingo, if you turn on **Screenshot bingo drops**, screenshots of your game screen for drops on the bingo's item list;
 - like any website you connect to, your IP address.
 
-Clan moderators can see what you've sent; the drop log is public on ocage.cc. Reports that can't be sent are kept in `.runelite/ocage/` until they can.
+Clan moderators can see what you've sent; the drop log is public on ocage.cc. Reports that can't be sent are kept in `.runelite/plugin-data/ocage/` until they can.
 
 ## Help
 

@@ -7,12 +7,9 @@ import java.awt.Graphics2D;
 import java.awt.Image;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -48,7 +45,6 @@ import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
-import net.runelite.client.RuneLite;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.config.RuneScapeProfile;
@@ -62,6 +58,7 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.util.Filepath;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.Text;
 import okhttp3.OkHttpClient;
@@ -83,7 +80,7 @@ import okhttp3.OkHttpClient;
  * a boss event counts plugin reports; the rest are dropped unsent.</li>
  * <li><b>Delivery.</b> Reports queue and upload in batches every few seconds;
  * if the server can't be reached they wait and retry. The queue is saved to
- * {@code .runelite/ocage/} as it changes, so a restart doesn't lose what
+ * {@code .runelite/plugin-data/ocage/} as it changes, so a restart doesn't lose what
  * hasn't been sent (the bot accepts reports up to 7 days old). Each report
  * carries its own id, so a resent batch never counts twice.</li>
  * <li><b>Bingo.</b> During a bingo the player is on a team for, {@link OcageOverlay}
@@ -101,7 +98,11 @@ import okhttp3.OkHttpClient;
 @PluginDescriptor(
 	name = "Ocage",
 	description = "Reports your kills and notable drops to the Ocage clan bot for clan events",
-	tags = {"clan", "ocage", "events", "drops", "boss", "bingo"}
+	tags = {"clan", "ocage", "events", "drops", "boss", "bingo"},
+	// The Plugin Hub name (plugins/ocage), which names the data directory,
+	// .runelite/plugin-data/ocage; RuneLite moves .runelite/ocage there once.
+	internalName = "ocage",
+	legacyDataDirectory = "ocage"
 )
 public class OcagePlugin extends Plugin
 {
@@ -137,8 +138,6 @@ public class OcagePlugin extends Plugin
 
 	private static final int FLUSH_SECONDS = 5;
 	private static final int BATCH_SIZE = 50;
-	/** Where the unsent queue is saved, under RuneLite's own folder. */
-	private static final String QUEUE_DIR = "ocage";
 	/** Past this many unsent reports (server down for a long time) the oldest are dropped. */
 	private static final int MAX_QUEUE = 1000;
 	/**
@@ -196,6 +195,8 @@ public class OcagePlugin extends Plugin
 	private OcagePanel panel;
 	private NavigationButton navButton;
 	private ScheduledFuture<?> flushTask;
+	/** .runelite/plugin-data/ocage (all file access goes through it); null if RuneLite couldn't provide it. */
+	private Filepath dataDir;
 
 	private final List<Pending> queue = new ArrayList<>();
 	/** The queue changed since it was last saved. */
@@ -290,6 +291,16 @@ public class OcagePlugin extends Plugin
 		navButton = NavigationButton.builder().tooltip("Ocage").icon(icon).priority(8).panel(panel).build();
 		clientToolbar.addNavigation(navButton);
 		overlayManager.add(overlay);
+		try
+		{
+			dataDir = getPluginDirectory();
+		}
+		catch (IOException | IllegalArgumentException e)
+		{
+			// Reports still send; they just aren't kept over a restart.
+			log.warn("No Ocage data directory; unsent reports won't survive a restart", e);
+			dataDir = null;
+		}
 		loadQueue();
 		flushTask = executor.scheduleWithFixedDelay(this::tick, FLUSH_SECONDS, FLUSH_SECONDS, TimeUnit.SECONDS);
 		clientThread.invokeLater(this::captureAccount);
@@ -1041,10 +1052,10 @@ public class OcagePlugin extends Plugin
 		queueDirty = true;
 	}
 
-	/** The saved queue for this server (each server has its own keys). */
-	private File queueFile()
+	/** The saved queue for this server (each server has its own keys); null if there's no data directory. */
+	private Filepath queueFile()
 	{
-		return new File(new File(RuneLite.RUNELITE_DIR, QUEUE_DIR), "queue-" + keyName() + ".json");
+		return dataDir == null ? null : dataDir.joinSegment("queue-" + keyName() + ".json");
 	}
 
 	/** Startup: picks up whatever a previous session couldn't send. */
@@ -1054,12 +1065,12 @@ public class OcagePlugin extends Plugin
 		{
 			queue.clear();
 		}
-		File file = queueFile();
-		if (!file.exists())
+		Filepath file = queueFile();
+		if (file == null || !file.exists())
 		{
 			return;
 		}
-		try (Reader reader = Files.newBufferedReader(file.toPath(), StandardCharsets.UTF_8))
+		try (Reader reader = file.openBufferedReader())
 		{
 			Pending[] saved = gson.fromJson(reader, Pending[].class);
 			synchronized (queue)
@@ -1095,21 +1106,25 @@ public class OcagePlugin extends Plugin
 		{
 			copy = new ArrayList<>(queue);
 		}
-		File file = queueFile();
+		Filepath file = queueFile();
+		if (file == null)
+		{
+			return;  // kept in memory only
+		}
 		try
 		{
 			if (copy.isEmpty())
 			{
-				Files.deleteIfExists(file.toPath());
+				file.deleteIfExists();
 				return;
 			}
-			Files.createDirectories(file.getParentFile().toPath());
-			File temp = new File(file.getPath() + ".tmp");
-			try (Writer writer = Files.newBufferedWriter(temp.toPath(), StandardCharsets.UTF_8))
+			dataDir.createDirectories();
+			Filepath temp = dataDir.joinSegment(file.getFileName() + ".tmp");
+			try (Writer writer = temp.openBufferedWriter())
 			{
 				gson.toJson(copy, writer);
 			}
-			Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+			temp.moveTo(file, StandardCopyOption.REPLACE_EXISTING);
 		}
 		catch (IOException e)
 		{

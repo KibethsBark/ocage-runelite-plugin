@@ -49,12 +49,14 @@ public interface OcageConfig extends Config
 		name = "Screenshot bingo drops",
 		description = "Upload a screenshot of a drop that counts for a bingo, as its proof. "
 			+ "It shows your game screen; see 'Screenshot chat' for what's hidden. "
-			+ "Off: the drop is still submitted, without a picture.",
+			+ "Off (the default): the drop is still submitted, without a picture.",
+		// Plugin Hub rule: a setting that sends data to a third-party server is opt-in, with this warning.
+		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
 		position = 3
 	)
 	default boolean bingoScreenshots()
 	{
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
