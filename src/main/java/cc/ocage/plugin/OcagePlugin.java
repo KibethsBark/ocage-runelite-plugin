@@ -106,7 +106,7 @@ import okhttp3.OkHttpClient;
 )
 public class OcagePlugin extends Plugin
 {
-	static final String VERSION = "1.0.0";
+	static final String VERSION = "1.0.1";
 
 	/** "Your Vorkath kill count is: 123." and friends (chest, completion, success, harvest). */
 	private static final Pattern KC_PATTERN = Pattern.compile(
@@ -235,6 +235,9 @@ public class OcagePlugin extends Plugin
 	private int ticksSinceLogin;
 	private boolean caDirty;
 	private String lastCaTier;
+
+	/** Client thread: a captureAccount task is queued, waiting for the local player to load. */
+	private boolean captureWaiting;
 
 	/** The logged-in account, captured on the client thread for use elsewhere. */
 	private volatile String accountHash;
@@ -771,19 +774,49 @@ public class OcagePlugin extends Plugin
 		}
 	}
 
+	/**
+	 * Client thread: records the logged-in account, or, while the local player
+	 * hasn't loaded yet (the first logged-in tick), waits for it.
+	 *
+	 * The wait is one task that ClientThread retries every frame until it
+	 * returns true. It must never re-queue itself from inside a queued task
+	 * (an earlier version did): ClientThread runs tasks added during its pass
+	 * in that same pass, so two such tasks (from two LOGGED_IN events, or
+	 * ours and another plugin's) chase each other forever. The client thread
+	 * then never finishes the frame, the player never loads, and the queue
+	 * grows until the client runs out of memory: the login freeze players
+	 * reported (2026-10-10).
+	 */
 	private void captureAccount()
+	{
+		if (captureWaiting || tryCaptureAccount())
+		{
+			return;
+		}
+		captureWaiting = true;
+		clientThread.invokeLater(() ->
+		{
+			if (!tryCaptureAccount())
+			{
+				return false;  // deferred: ClientThread tries again next frame
+			}
+			captureWaiting = false;
+			return true;
+		});
+	}
+
+	/** Client thread: captureAccount's work; false while the local player isn't loaded yet. */
+	private boolean tryCaptureAccount()
 	{
 		if (client.getGameState() != GameState.LOGGED_IN)
 		{
-			return;
+			return true;  // nothing to capture (logged out meanwhile)
 		}
 		long hash = client.getAccountHash();
 		Player player = client.getLocalPlayer();
 		if (hash == -1 || player == null || player.getName() == null)
 		{
-			// The local player isn't loaded on the very first logged-in tick.
-			clientThread.invokeLater(this::captureAccount);
-			return;
+			return false;
 		}
 		boolean changed = !String.valueOf(hash).equals(accountHash);
 		if (changed)
@@ -798,6 +831,7 @@ public class OcagePlugin extends Plugin
 			rules = null;
 			executor.execute(this::refresh);
 		}
+		return true;
 	}
 
 	// -- Linking (called from the panel) ----------------------------------------
