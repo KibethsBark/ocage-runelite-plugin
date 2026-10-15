@@ -108,9 +108,11 @@ final class Api
 		final Long totalValue;
 		/** Loot only: a screenshot of it was taken, to upload if the bot asks (a bingo drop). */
 		final Boolean screenshot;
+		/** CA only: the tier before, when the plugin saw the tier rise in game (not a sync). */
+		final String previous;
 
 		private Report(String id, String type, String occurredAt, String source, Integer kc, List<Item> items,
-			String lootType, Long totalValue, Boolean screenshot)
+			String lootType, Long totalValue, Boolean screenshot, String previous)
 		{
 			this.id = id;
 			this.type = type;
@@ -121,41 +123,43 @@ final class Api
 			this.lootType = lootType;
 			this.totalValue = totalValue;
 			this.screenshot = screenshot;
+			this.previous = previous;
 		}
 
 		static Report kill(String id, String occurredAt, String boss, int kc)
 		{
-			return new Report(id, "kill", occurredAt, boss, kc, null, null, null, null);
+			return new Report(id, "kill", occurredAt, boss, kc, null, null, null, null, null);
 		}
 
 		/** A pet; {@code name} is null when the game didn't say which (a duplicate pet). */
 		static Report pet(String id, String occurredAt, String name)
 		{
-			return new Report(id, "pet", occurredAt, name, null, null, null, null, null);
+			return new Report(id, "pet", occurredAt, name, null, null, null, null, null, null);
 		}
 
 		/** A new collection-log item (the game's "New item added to your collection log" message). */
 		static Report clog(String id, String occurredAt, String name)
 		{
-			return new Report(id, "clog", occurredAt, name, null, null, null, null, null);
+			return new Report(id, "clog", occurredAt, name, null, null, null, null, null, null);
 		}
 
 		static Report loot(String id, String occurredAt, String source, String lootType, long totalValue, List<Item> items,
 			boolean screenshot)
 		{
-			return new Report(id, "loot", occurredAt, source, null, items, lootType, totalValue, screenshot ? true : null);
+			return new Report(id, "loot", occurredAt, source, null, items, lootType, totalValue, screenshot ? true : null, null);
 		}
 
 		/** The highest Combat Achievements tier the account has reached ("None" if none yet). */
-		static Report ca(String id, String occurredAt, String tier)
+		/** {@code previous}: the tier before, if the plugin saw it rise in game; null for a sync. */
+		static Report ca(String id, String occurredAt, String tier, String previous)
 		{
-			return new Report(id, "ca", occurredAt, tier, null, null, null, null, null);
+			return new Report(id, "ca", occurredAt, tier, null, null, null, null, null, previous);
 		}
 
 		/** This loot report with only {@code kept} items (the rest of its fields unchanged). */
 		Report withItems(List<Item> kept)
 		{
-			return new Report(id, type, occurredAt, source, kc, kept, lootType, totalValue, screenshot);
+			return new Report(id, type, occurredAt, source, kc, kept, lootType, totalValue, screenshot, previous);
 		}
 	}
 
@@ -208,6 +212,8 @@ final class Api
 		List<MeEvent> events;
 		/** Active bingos the player is on a team for (older bots don't send it). */
 		List<MeBingo> bingo;
+		/** Events that haven't started yet, soonest first (older bots don't send it). */
+		List<MeUpcoming> upcoming;
 		/** When to ask again: shorter while a bingo is on (older bots don't send it). */
 		@SerializedName("refresh_seconds")
 		Integer refreshSeconds;
@@ -254,6 +260,31 @@ final class Api
 		List<MeDrop> drops;
 		@SerializedName("drops_rank")
 		Integer dropsRank;
+	}
+
+	static final class MeUpcoming
+	{
+		String name;
+		/** "bingo" or "boss". */
+		@SerializedName("event_type")
+		String eventType;
+		/** UTC, "YYYY-MM-DD HH:MM:SS"; null while it has no date. */
+		@SerializedName("start_date")
+		String startDate;
+		/** "upcoming", or a bingo's sign-up stage: signup_open, signup_closed, drafting, drafted. */
+		String status;
+		/** A boss event's bosses. */
+		List<String> bosses;
+		/** A boss event's KC source: "plugin" or "temple". */
+		@SerializedName("tracking_source")
+		String trackingSource;
+		/** Whether the player is signed up; null unless the bingo is at a sign-up stage. */
+		@SerializedName("signed_up")
+		Boolean signedUp;
+		/** The player's team once teams are set. */
+		String team;
+		/** The event's page on the website, if the bot knows it. */
+		String url;
 	}
 
 	static final class MeDrop

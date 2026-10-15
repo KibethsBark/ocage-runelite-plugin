@@ -16,9 +16,14 @@ import java.awt.GridLayout;
 import java.awt.RenderingHints;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
 import javax.swing.BorderFactory;
@@ -37,11 +42,13 @@ import javax.swing.UIManager;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.LinkBrowser;
 
 /**
  * The Ocage sidebar: the clan banner, linking with a /plugin link code, then
- * your standing in active clan events. Every method runs on the Swing thread
- * (the plugin calls them through SwingUtilities.invokeLater).
+ * your standing in active clan events, then the events still to come. Every
+ * method runs on the Swing thread (the plugin calls them through
+ * SwingUtilities.invokeLater).
  *
  * <p>Layout: one left-aligned column. Text is shown in read-only text areas
  * that wrap at word boundaries to whatever width the sidebar gives them —
@@ -53,7 +60,15 @@ import net.runelite.client.ui.PluginPanel;
 @Slf4j
 class OcagePanel extends PluginPanel
 {
+	/** How the bot writes dates (UTC). */
+	private static final DateTimeFormatter BOT_DATE = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+	private static final DateTimeFormatter START = DateTimeFormatter.ofPattern("EEE d MMM, HH:mm 'UTC'", Locale.ENGLISH);
+	/** The clan's own website: the only place besides the bot's own host a panel link may open. */
+	private static final String CLAN_DOMAIN = "ocage.cc";
+
 	private final OcagePlugin plugin;
+	/** The bot's host, for {@link #linkHost}. */
+	private final String apiUrl;
 	private final JTextArea server;
 	private final JTextArea status = text("", null);
 	private final JTextArea error = text("", ColorScheme.PROGRESS_ERROR_COLOR);
@@ -61,17 +76,21 @@ class OcagePanel extends PluginPanel
 	private final JButton linkButton = new JButton("Link");
 	private final JButton unlinkButton = new JButton("Unlink");
 	private final JButton refreshButton = new JButton("Refresh");
+	/** Refresh, plus Unlink when linked (GridLayout keeps a cell for a hidden button, so they're re-added). */
+	private final JPanel buttons = new JPanel(new GridLayout(1, 0, 4, 0));
 	private final JPanel linkForm = new JPanel(new BorderLayout(0, 4));
 	private final JPanel standings = column();
 	/** Whether each section is open, kept across refreshes (all open at first). */
 	private boolean bingoOpen = true;
 	private boolean bossOpen = true;
+	private boolean upcomingOpen = true;
 	/** The width the text was last wrapped at. */
 	private int laidOutWidth = -1;
 
 	OcagePanel(OcagePlugin plugin, String serverUrl, boolean production)
 	{
 		this.plugin = plugin;
+		this.apiUrl = serverUrl;
 		setLayout(new BorderLayout(0, 8));
 		setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
 
@@ -100,10 +119,8 @@ class OcagePanel extends PluginPanel
 		});
 		top.add(row(linkForm));
 
-		JPanel buttons = new JPanel(new GridLayout(1, 2, 4, 0));
 		buttons.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
-		buttons.add(refreshButton);
-		buttons.add(unlinkButton);
+		refreshButton.setToolTipText("Check your link and events again now");
 		refreshButton.addActionListener(e -> plugin.refresh());
 		unlinkButton.addActionListener(e -> plugin.unlink());
 		top.add(row(buttons));
@@ -244,13 +261,14 @@ class OcagePanel extends PluginPanel
 		status.setText("Log in to the game to link or see your events.");
 		setLinkedControls(false);
 		linkForm.setVisible(false);
+		buttons.setVisible(false);
 		standings.removeAll();
 		relayout();
 	}
 
 	void showNotLinked()
 	{
-		status.setText("This account isn't linked yet.");
+		status.setText("This account isn't linked yet. Linked before? Click Refresh first.");
 		setLinkedControls(false);
 		standings.removeAll();
 		relayout();
@@ -298,6 +316,14 @@ class OcagePanel extends PluginPanel
 				bossCards.add(eventCard(event));
 			}
 		}
+		List<JComponent> upcomingCards = new ArrayList<>();
+		if (me.upcoming != null)
+		{
+			for (Api.MeUpcoming event : me.upcoming)
+			{
+				upcomingCards.add(upcomingCard(event));
+			}
+		}
 		if (bingoCards.isEmpty() && bossCards.isEmpty())
 		{
 			standings.add(row(text("No active events right now.", null)));
@@ -309,6 +335,10 @@ class OcagePanel extends PluginPanel
 		if (!bossCards.isEmpty())
 		{
 			standings.add(row(section("Boss events", bossCards, bossOpen, open -> bossOpen = open)));
+		}
+		if (!upcomingCards.isEmpty())
+		{
+			standings.add(row(section("Upcoming", upcomingCards, upcomingOpen, open -> upcomingOpen = open)));
 		}
 		relayout();
 	}
@@ -452,6 +482,147 @@ class OcagePanel extends PluginPanel
 		return card(lines);
 	}
 
+	/**
+	 * An event that hasn't started: when it starts; for a bingo, the sign-up
+	 * stage, whether the player is signed up and their team once drafted; for
+	 * a boss event, its bosses and what counts the KC. Then a website link.
+	 */
+	private JPanel upcomingCard(Api.MeUpcoming event)
+	{
+		boolean bingo = !"boss".equals(event.eventType);
+		JPanel lines = column();
+		lines.add(row(bold(event.name)));
+		lines.add(row(text((bingo ? "Bingo" : "Boss event") + " - " + starts(event.startDate), null)));
+		if (bingo)
+		{
+			String stage = signupStage(event);
+			if (stage != null)
+			{
+				Color color = event.signedUp == null ? ColorScheme.LIGHT_GRAY_COLOR
+					: event.signedUp ? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_INPROGRESS_COLOR;
+				lines.add(row(text(stage, color)));
+			}
+			if (event.team != null)
+			{
+				lines.add(row(text("Your team: " + event.team, null)));
+			}
+		}
+		else
+		{
+			if (event.bosses != null && !event.bosses.isEmpty())
+			{
+				lines.add(row(indented(text(String.join(", ", event.bosses), null))));
+			}
+			String source = "plugin".equals(event.trackingSource) ? "Counted by this plugin: keep it on"
+				: "temple".equals(event.trackingSource) ? "Counted from TempleOSRS" : null;
+			if (source != null)
+			{
+				lines.add(row(text(source, ColorScheme.LIGHT_GRAY_COLOR)));
+			}
+		}
+		JComponent link = link(event);
+		if (link != null)
+		{
+			lines.add(row(link));
+		}
+		return card(lines);
+	}
+
+	/** "starts Fri 7 Nov, 18:00 UTC"; the bot's own text if it can't be read. */
+	static String starts(String startDate)
+	{
+		if (startDate == null || startDate.isEmpty())
+		{
+			return "date to be announced";
+		}
+		try
+		{
+			String full = startDate.length() == 10 ? startDate + " 00:00:00" : startDate;
+			return "starts " + LocalDateTime.parse(full, BOT_DATE).format(START);
+		}
+		catch (DateTimeParseException e)
+		{
+			return "starts " + startDate + " UTC";
+		}
+	}
+
+	/** A bingo's sign-up stage, and whether the player is signed up; null before sign-ups open. */
+	static String signupStage(Api.MeUpcoming event)
+	{
+		String you = event.signedUp == null ? "" : event.signedUp ? ": you're signed up" : ": you haven't signed up";
+		if (event.status == null)
+		{
+			return null;
+		}
+		switch (event.status)
+		{
+			case "signup_open":
+				return "Sign-ups open" + you;
+			case "signup_closed":
+				return "Sign-ups closed" + you;
+			case "drafting":
+				return "Teams being drafted" + you;
+			case "drafted":
+				return "Teams picked" + you;
+			default:
+				return null;
+		}
+	}
+
+	/** "Sign up on ocage.cc" while sign-ups are open and the player isn't in, else "View on ocage.cc". */
+	private JComponent link(Api.MeUpcoming event)
+	{
+		String host = linkHost(event.url, apiUrl);
+		if (host == null)
+		{
+			return null;
+		}
+		boolean signUp = "signup_open".equals(event.status) && Boolean.FALSE.equals(event.signedUp);
+		JLabel label = new JLabel((signUp ? "Sign up on " : "View on ") + host);
+		label.setForeground(ColorScheme.GRAND_EXCHANGE_LIMIT);
+		label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+		label.setToolTipText(event.url);
+		label.addMouseListener(new MouseAdapter()
+		{
+			@Override
+			public void mouseClicked(MouseEvent e)
+			{
+				LinkBrowser.browse(event.url);
+			}
+		});
+		return label;
+	}
+
+	/**
+	 * The host of a link the bot sent, if the panel may open it: https on the
+	 * clan's own domain ({@value #CLAN_DOMAIN} or a subdomain) or the bot's
+	 * own host (a test server's site); else null, and no link is shown. The
+	 * bot is ours, but the panel shouldn't open just any address it's sent.
+	 */
+	static String linkHost(String url, String apiUrl)
+	{
+		if (url == null || !url.startsWith("https://"))
+		{
+			return null;
+		}
+		try
+		{
+			String host = URI.create(url).getHost();
+			if (host == null)
+			{
+				return null;
+			}
+			host = host.toLowerCase(Locale.ROOT);
+			String apiHost = apiUrl == null ? null : URI.create(apiUrl).getHost();
+			boolean clan = host.equals(CLAN_DOMAIN) || host.endsWith("." + CLAN_DOMAIN);
+			return clan || host.equalsIgnoreCase(apiHost) ? host : null;
+		}
+		catch (IllegalArgumentException e)
+		{
+			return null;
+		}
+	}
+
 	/** A dark card around one event's lines, with a gap below it. */
 	private static JPanel card(JPanel lines)
 	{
@@ -470,8 +641,15 @@ class OcagePanel extends PluginPanel
 	{
 		linkForm.setVisible(!linked);
 		linkButton.setEnabled(true);
-		unlinkButton.setVisible(linked);
-		refreshButton.setVisible(linked);
+		// Refresh shows while not linked too: right after login the panel can say "not linked"
+		// before RuneLite has loaded the account's settings, and Refresh reads the key again.
+		buttons.removeAll();
+		buttons.add(refreshButton);
+		if (linked)
+		{
+			buttons.add(unlinkButton);
+		}
+		buttons.setVisible(true);
 	}
 
 	private static String rank(Integer rank)

@@ -16,8 +16,9 @@ Each game account is linked separately. To stop, click **Unlink** in the panel o
 
 - **Boss events:** while a clan boss event is running, each kill of a tracked boss counts toward your total. The side panel shows the KC you've gained for each boss and your unique drops.
 - **Bingo:** during a bingo you're on a team for, an overlay shows the event, your team, the event password and the time. A drop on the bingo's item list is screenshotted and submitted for a moderator to review. Nothing is approved automatically. The side panel shows your team's rank and points.
+- **Upcoming events:** the side panel lists events that haven't started yet: when they start, a bingo's sign-up stage and whether you're signed up, a boss event's bosses, and a link to the event's page.
 - **Drop log:** valuable drops, raid and clue items, pets and new collection-log items go to the clan's drop log.
-- **Combat Achievements:** reaching a new Combat Achievements tier is announced in the clan's Discord. Tiers you already have when you install the plugin are recorded but not announced.
+- **Combat Achievements:** reaching a new Combat Achievements tier is announced in the clan's Discord. Tiers you already have when you install the plugin are recorded but not announced: open your Combat Achievements once after linking so the plugin can read them.
 - **Chat messages** tell you when a kill or drop counts or you reach a new Combat Achievements tier, and when your bingo team's points or rank change.
 
 Outside a clan event, kills aren't sent. Drops are only sent when the clan's rules ask for them: collection-log items, items the moderators listed, and anything above a value set by the clan.
@@ -27,10 +28,14 @@ Outside a clan event, kills aren't sent. Drops are only sent when the clan's rul
 | Setting | What it does |
 |---|---|
 | Show counted drops | A chat message when a kill or drop counts for an event, or you reach a new Combat Achievements tier |
-| Show bingo overlay | The event overlay during a bingo. Screenshots of bingo drops always include it |
 | Screenshot bingo drops | Off by default. On: a bingo drop is submitted with a screenshot of your game screen as its proof. Off: it's still submitted, without a picture |
 | Bingo standing updates | A chat message when your team's points or rank change |
 | Screenshot chat | What bingo screenshots hide: private messages (the default), the whole chat box, or nothing |
+| **Bingo overlay** section | |
+| Show on screen | The overlay while you play. Off or on, bingo drop screenshots always include it, but only while Screenshot bingo drops is on |
+| Style | Full (event, team, password, time) or Compact (event and password); drop screenshots always use Full |
+| Time | Short (14 Oct 18:42 UTC) or Long (Tue 14 Oct 2026 18:42:05 UTC) |
+| Size | 75% to 200%. Hold Alt and drag the overlay's edge to make it wider |
 
 ## What it sends, and where
 

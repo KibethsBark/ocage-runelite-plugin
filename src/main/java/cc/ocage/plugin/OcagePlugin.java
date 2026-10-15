@@ -38,11 +38,13 @@ import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Player;
+import net.runelite.api.events.AccountHashChanged;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.PlayerChanged;
 import net.runelite.api.events.VarbitChanged;
+import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
@@ -50,6 +52,7 @@ import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.config.RuneScapeProfile;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.RuneScapeProfileChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.plugins.Plugin;
@@ -107,7 +110,7 @@ import okhttp3.OkHttpClient;
 )
 public class OcagePlugin extends Plugin
 {
-	static final String VERSION = "1.0.1";
+	static final String VERSION = "1.0.2";
 
 	/** "Your Vorkath kill count is: 123." and friends (chest, completion, success, harvest). */
 	private static final Pattern KC_PATTERN = Pattern.compile(
@@ -132,8 +135,11 @@ public class OcagePlugin extends Plugin
 		VarbitID.CA_THRESHOLD_EASY, VarbitID.CA_THRESHOLD_MEDIUM, VarbitID.CA_THRESHOLD_HARD,
 		VarbitID.CA_THRESHOLD_ELITE, VarbitID.CA_THRESHOLD_MASTER, VarbitID.CA_THRESHOLD_GRANDMASTER,
 	};
-	/** Game ticks after login before the CA tier is read, so every varbit has loaded (a GM must never read as "None"). */
-	private static final int CA_SETTLE_TICKS = 5;
+	/** The Combat Achievements interfaces: opening any of them is a safe moment to read the tier. */
+	private static final Set<Integer> CA_INTERFACES = Set.of(
+		InterfaceID.CA_OVERVIEW, InterfaceID.CA_TASKS, InterfaceID.CA_BOSSES, InterfaceID.CA_REWARDS);
+	/** RS-profile config key: the highest CA tier this account has reported. */
+	private static final String CA_TIER_KEY = "caTier";
 	/** A new pet's collection-log message comes with its pet message; this is how far apart they may be. */
 	private static final long PET_NAME_WAIT_MS = 3_000;
 
@@ -231,11 +237,10 @@ public class OcagePlugin extends Plugin
 	private String lastClogItem;
 	private long lastClogAt;
 
-	/** Client thread: ticks since login (for CA_SETTLE_TICKS), whether CA points may have changed, and
-	 * the tier last reported this session (null: not yet for this login). */
-	private int ticksSinceLogin;
-	private boolean caDirty;
-	private String lastCaTier;
+	/** Client thread: the CA points last seen this login (0 until the game sends them). */
+	private int caPoints;
+	/** Client thread: the account the CA points varbit was last read for. */
+	private String caAccount;
 
 	/** The logged-in account, captured on the client thread for use elsewhere. */
 	private volatile String accountHash;
@@ -334,70 +339,120 @@ public class OcagePlugin extends Plugin
 		}
 		else if (event.getGameState() == GameState.LOGIN_SCREEN)
 		{
-			ticksSinceLogin = 0;
-			caDirty = false;
-			lastCaTier = null;
+			caPoints = 0;
 			accountHash = null;
 			rsn = null;
 			SwingUtilities.invokeLater(() -> panel.showLoggedOut());
 		}
 	}
 
-	@Subscribe
-	public void onGameTick(GameTick event)
-	{
-		if (ticksSinceLogin < CA_SETTLE_TICKS)
-		{
-			ticksSinceLogin++;
-			caDirty = true;  // read the tier once everything has loaded
-			return;
-		}
-		if (caDirty)
-		{
-			caDirty = false;
-			checkCaTier();
-		}
-	}
-
+	/**
+	 * The CA tier is only read when it can be trusted, never polled. At login the game sends the points
+	 * and the tier thresholds in no fixed order, so a Grandmaster can briefly read as no tier; reading
+	 * then would report a false "None". So: a change of points from a value already seen this login is
+	 * a task being completed; a points value arriving from 0 is the login sync, and is skipped.
+	 */
 	@Subscribe
 	public void onVarbitChanged(VarbitChanged event)
 	{
-		if (event.getVarbitId() == VarbitID.CA_POINTS)
-		{
-			caDirty = true;
-		}
-	}
-
-	/**
-	 * Client thread: reports the highest Combat Achievements tier reached, the first time this login and
-	 * whenever it rises. Thresholds of 0 mean the varbits haven't loaded; nothing is sent then.
-	 */
-	private void checkCaTier()
-	{
-		if (client.getGameState() != GameState.LOGGED_IN || currentKey() == null)
+		if (event.getVarbitId() != VarbitID.CA_POINTS)
 		{
 			return;
 		}
-		int points = client.getVarbitValue(VarbitID.CA_POINTS);
+		int previous = caPoints;
+		caPoints = event.getValue();
+		if (previous > 0 && caPoints != previous)
+		{
+			// The tier before the task too, so a tier reached here is announced even on the account's
+			// first report (which the bot otherwise takes as what the player already had).
+			String before = caTierFor(previous);
+			if (before != null)
+			{
+				checkCaTier(before);
+			}
+		}
+	}
+
+	/** Opening the Combat Achievements interface: everything it shows has loaded, so the tier is reliable. */
+	@Subscribe
+	public void onWidgetLoaded(WidgetLoaded event)
+	{
+		if (CA_INTERFACES.contains(event.getGroupId()))
+		{
+			clientThread.invokeLater(() -> checkCaTier(null));
+		}
+	}
+
+	/** Client thread: the highest CA tier this account has reported (RS-profile config), or null. */
+	private String reportedCaTier()
+	{
+		return configManager.getRSProfileConfiguration(OcageConfig.GROUP, CA_TIER_KEY);
+	}
+
+	/** Index of a tier in CA_TIERS; -1 for "None" or an unknown name. */
+	static int caRank(String tier)
+	{
+		for (int i = 0; i < CA_TIERS.length; i++)
+		{
+			if (CA_TIERS[i].equals(tier))
+			{
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	/** Client thread: the highest CA tier {@code points} reaches, or null while the thresholds haven't loaded. */
+	private String caTierFor(int points)
+	{
 		String highest = "None";
 		for (int i = 0; i < CA_TIERS.length; i++)
 		{
 			int threshold = client.getVarbitValue(CA_THRESHOLDS[i]);
 			if (threshold <= 0)
 			{
-				return;
+				return null;
 			}
 			if (points >= threshold)
 			{
 				highest = CA_TIERS[i];
 			}
 		}
-		if (highest.equals(lastCaTier))
+		return highest;
+	}
+
+	/**
+	 * Client thread: reports the highest Combat Achievements tier reached, when it's above the one this
+	 * account last reported (or none was). Called only at the moments described at onVarbitChanged.
+	 * {@code previous} is the tier before a task completed in game, null when opening the interface.
+	 */
+	private void checkCaTier(String previous)
+	{
+		if (client.getGameState() != GameState.LOGGED_IN || currentKey() == null)
 		{
 			return;
 		}
-		lastCaTier = highest;
-		enqueue(Api.Report.ca(newId(), Instant.now().toString(), highest));
+		String highest = caTierFor(client.getVarbitValue(VarbitID.CA_POINTS));
+		if (highest == null)
+		{
+			return;
+		}
+		String reported = reportedCaTier();
+		if (reported != null && caRank(highest) <= caRank(reported))
+		{
+			return;
+		}
+		configManager.setRSProfileConfiguration(OcageConfig.GROUP, CA_TIER_KEY, highest);
+		enqueue(Api.Report.ca(newId(), Instant.now().toString(), highest, previous));
+	}
+
+	/** Client thread: asks a linked player to open the CA interface once, if their tier isn't known yet. */
+	private void promptCaSync()
+	{
+		if (client.getGameState() == GameState.LOGGED_IN && currentKey() != null && reportedCaTier() == null)
+		{
+			chat("Open your Combat Achievements once so we can record your current tier.");
+		}
 	}
 
 	@Subscribe
@@ -563,6 +618,12 @@ public class OcagePlugin extends Plugin
 		return config.bingoOverlay() || capturing > 0;
 	}
 
+	/** True while a bingo screenshot is being taken: the overlay is drawn in full for it. */
+	boolean capturingScreenshot()
+	{
+		return capturing > 0;
+	}
+
 	/** Lower-cased Item List names of every active bingo. */
 	private static Set<String> bingoNames(Api.Rules rules)
 	{
@@ -599,7 +660,9 @@ public class OcagePlugin extends Plugin
 	/**
 	 * Client thread: screenshots the game (overlay included) for report
 	 * {@code reportId}. If the player hid the overlay it's drawn for one
-	 * frame first, so the frame after that is captured.
+	 * frame first, so the frame after that is captured. The second request
+	 * waits for the next client cycle: DrawManager hands every listener it
+	 * queues while running listeners the same frame, overlay or not.
 	 */
 	private void takeScreenshot(String reportId)
 	{
@@ -633,7 +696,7 @@ public class OcagePlugin extends Plugin
 			}
 			else
 			{
-				drawManager.requestNextFrameListener(second -> capture(shot, second, restore));
+				clientThread.invokeLater(() -> drawManager.requestNextFrameListener(second -> capture(shot, second, restore)));
 			}
 		});
 	}
@@ -800,14 +863,22 @@ public class OcagePlugin extends Plugin
 		if (changed)
 		{
 			lastMe = null;
-			lastCaTier = null;
 		}
 		accountHash = String.valueOf(hash);
 		rsn = player.getName();
+		if (caPoints == 0 && accountHash.equals(caAccount))
+		{
+			// In case the game kept the points from before logging out and sends no change for them.
+			// Only for the same account: after switching, the varbit may still hold the last account's
+			// points, and the new account's arriving would read as a task completed.
+			caPoints = client.getVarbitValue(VarbitID.CA_POINTS);
+		}
+		caAccount = accountHash;
 		if (changed)
 		{
 			rules = null;
 			executor.execute(this::refresh);
+			promptCaSync();
 		}
 	}
 
@@ -818,6 +889,30 @@ public class OcagePlugin extends Plugin
 		if (event.getPlayer() == client.getLocalPlayer())
 		{
 			captureAccount();
+		}
+	}
+
+	/** The account hash can arrive after the player has loaded: capture then too. */
+	@Subscribe
+	public void onAccountHashChanged(AccountHashChanged event)
+	{
+		captureAccount();
+	}
+
+	/**
+	 * The link key lives in the account's RuneLite profile, which RuneLite
+	 * only selects at login, sometimes in the same PlayerChanged that tells
+	 * us the player has loaded. A key read before that comes back empty, and
+	 * the panel said "This account isn't linked yet" until the next refresh,
+	 * up to a minute later; players relinked (1.0.1, 2026-10-10). So read it
+	 * again as soon as the profile is selected.
+	 */
+	@Subscribe
+	public void onRuneScapeProfileChanged(RuneScapeProfileChanged event)
+	{
+		if (accountHash != null)
+		{
+			executor.execute(this::refresh);
 		}
 	}
 
@@ -839,11 +934,15 @@ public class OcagePlugin extends Plugin
 			{
 				configManager.setRSProfileConfiguration(OcageConfig.GROUP, keyName(), value.token);
 				SwingUtilities.invokeLater(() -> panel.showLinked(value.rsn));
-				// Record the CA tiers they already have now, not at their next login.
+				// Send the tier this account already has to the new key's server, or ask for a sync.
 				clientThread.invokeLater(() ->
 				{
-					lastCaTier = null;
-					caDirty = true;
+					String tier = reportedCaTier();
+					if (tier != null)
+					{
+						enqueue(Api.Report.ca(newId(), Instant.now().toString(), tier, null));
+					}
+					promptCaSync();
 				});
 				refresh();
 			}

@@ -3,11 +3,19 @@ package cc.ocage.plugin;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
+import net.runelite.client.config.ConfigSection;
 
 @ConfigGroup(OcageConfig.GROUP)
 public interface OcageConfig extends Config
 {
 	String GROUP = "ocage";
+
+	@ConfigSection(
+		name = "Bingo overlay",
+		description = "The box on the game screen during a bingo: event, team, password and time",
+		position = 10
+	)
+	String overlaySection = "overlay";
 
 	@ConfigItem(
 		keyName = "countedMessages",
@@ -34,14 +42,54 @@ public interface OcageConfig extends Config
 
 	@ConfigItem(
 		keyName = "bingoOverlay",
-		name = "Show bingo overlay",
-		description = "During a bingo, show the event, your team and the event password on screen. "
-			+ "Screenshots of bingo drops always include it.",
-		position = 2
+		name = "Show on screen",
+		description = "Show the bingo overlay while you play. Off or on, bingo drop screenshots "
+			+ "always include it (with the chat hidden as 'Screenshot chat' says), "
+			+ "but only while 'Screenshot bingo drops' is on.",
+		position = 11,
+		section = overlaySection
 	)
 	default boolean bingoOverlay()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+		keyName = "overlayStyle",
+		name = "Style",
+		description = "Full: the event, your team, the password and the time. Compact: the event and password only. "
+			+ "Bingo drop screenshots always use Full.",
+		position = 12,
+		section = overlaySection
+	)
+	default OverlayStyle overlayStyle()
+	{
+		return OverlayStyle.FULL;
+	}
+
+	@ConfigItem(
+		keyName = "overlayTime",
+		name = "Time",
+		description = "Short: 14 Oct 18:42 UTC. Long: Tue 14 Oct 2026 18:42:05 UTC. "
+			+ "The Compact style shows no time.",
+		position = 13,
+		section = overlaySection
+	)
+	default OverlayTime overlayTime()
+	{
+		return OverlayTime.SHORT;
+	}
+
+	@ConfigItem(
+		keyName = "overlaySize",
+		name = "Size",
+		description = "How big the overlay is drawn. Hold Alt and drag its edge to make it wider.",
+		position = 14,
+		section = overlaySection
+	)
+	default OverlaySize overlaySize()
+	{
+		return OverlaySize.SIZE_100;
 	}
 
 	@ConfigItem(

@@ -28,7 +28,7 @@ dependencies {
 }
 
 group = 'cc.ocage'
-version = '1.0.1'
+version = '1.0.2'
 
 // Which bot API a build talks to. The Plugin Hub replaces this file with its
 // own (build=standard), which never fills the address in, so a Hub release
