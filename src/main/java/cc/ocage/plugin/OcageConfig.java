@@ -30,6 +30,31 @@ public interface OcageConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "localTimes",
+		name = "Local times in panel",
+		description = "Show event start and end times in the side panel in your computer's time zone. "
+			+ "Off: UTC. The bingo overlay always shows UTC.",
+		position = 2
+	)
+	default boolean localTimes()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "openPanel",
+		name = "Open the Ocage panel",
+		description = "Opens the Ocage side panel by itself. At login: once each time you log in. "
+			+ "During events: once for each running bingo you're on a team for, or boss event (not upcoming ones). "
+			+ "Never: only when you click its button. It's opened once, never kept open: close it and it stays closed.",
+		position = 6
+	)
+	default PanelOpen openPanel()
+	{
+		return PanelOpen.NEVER;
+	}
+
+	@ConfigItem(
 		keyName = "bingoUpdates",
 		name = "Bingo standing updates",
 		description = "Show a chat message when your team's bingo points or rank change",

@@ -8,16 +8,16 @@ It's only useful to Ocage members: it does nothing until you link it to your Dis
 
 1. Install **Ocage** from the Plugin Hub, and make sure RuneLite's **Loot Tracker** plugin is on (it's on by default).
 2. In the Ocage Discord, run `/plugin link`. The bot replies with a one-time code.
-3. Open the **Ocage** side panel in RuneLite (the OCAGE icon), paste the code and click **Link**, while logged in to the account you want to link.
+3. Open the **Ocage** side panel in RuneLite (the crowned frog icon), paste the code and click **Link**, while logged in to the account you want to link.
 
 Each game account is linked separately. To stop, click **Unlink** in the panel or turn the plugin off.
 
 ## What it does
 
-- **Boss events:** while a clan boss event is running, each kill of a tracked boss counts toward your total. The side panel shows the KC you've gained for each boss and your unique drops.
+- **Boss events:** while a clan boss event is running, each kill of a tracked boss counts toward your total. The side panel shows the KC you've gained for each boss, the event's top 5 by KC (with your own rank if you're further down), and your unique drops.
 - **Bingo:** during a bingo you're on a team for, an overlay shows the event, your team, the event password and the time. A drop on the bingo's item list is screenshotted and submitted for a moderator to review. Nothing is approved automatically. The side panel shows your team's rank and points.
 - **Upcoming events:** the side panel lists events that haven't started yet: when they start, a bingo's sign-up stage and whether you're signed up, a boss event's bosses, and a link to the event's page.
-- **Drop log:** valuable drops, raid and clue items, pets and new collection-log items go to the clan's drop log.
+- **Drop log:** valuable drops, raid and clue items, pets and new collection-log items go to the clan's drop log. To get a duplicate pet's name logged, turn on the game setting **Untradeable loot notifications** (pet broadcasts in the clan chat name it too).
 - **Combat Achievements:** reaching a new Combat Achievements tier is announced in the clan's Discord. Tiers you already have when you install the plugin are recorded but not announced: open your Combat Achievements once after linking so the plugin can read them.
 - **Chat messages** tell you when a kill or drop counts or you reach a new Combat Achievements tier, and when your bingo team's points or rank change.
 
@@ -28,9 +28,11 @@ Outside a clan event, kills aren't sent. Drops are only sent when the clan's rul
 | Setting | What it does |
 |---|---|
 | Show counted drops | A chat message when a kill or drop counts for an event, or you reach a new Combat Achievements tier |
+| Local times in panel | On by default: the side panel shows event start and end times in your computer's time zone (e.g. 19:00 CET). Off: UTC. The overlay always shows UTC |
 | Screenshot bingo drops | Off by default. On: a bingo drop is submitted with a screenshot of your game screen as its proof. Off: it's still submitted, without a picture |
 | Bingo standing updates | A chat message when your team's points or rank change |
 | Screenshot chat | What bingo screenshots hide: private messages (the default), the whole chat box, or nothing |
+| Open the Ocage panel | Opens the Ocage side panel by itself: **At login** (once each login), **During events** (once for each running bingo or boss event you're in, not upcoming ones) or **Never** (the default). It's opened once and never kept open |
 | **Bingo overlay** section | |
 | Show on screen | The overlay while you play. Off or on, bingo drop screenshots always include it, but only while Screenshot bingo drops is on |
 | Style | Full (event, team, password, time) or Compact (event and password); drop screenshots always use Full |

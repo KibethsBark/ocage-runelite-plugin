@@ -17,7 +17,9 @@ import java.awt.RenderingHints;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -60,9 +62,13 @@ import net.runelite.client.util.LinkBrowser;
 @Slf4j
 class OcagePanel extends PluginPanel
 {
+	/** The bot's time zone. A named zone, so times show "UTC" rather than "Z". */
+	static final ZoneId UTC = ZoneId.of("UTC");
 	/** How the bot writes dates (UTC). */
 	private static final DateTimeFormatter BOT_DATE = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-	private static final DateTimeFormatter START = DateTimeFormatter.ofPattern("EEE d MMM, HH:mm 'UTC'", Locale.ENGLISH);
+	/** "Sat 7 Nov, 19:00 CET": always with the zone, so nobody takes a local time for UTC. */
+	private static final DateTimeFormatter WHEN = DateTimeFormatter.ofPattern("EEE d MMM, HH:mm z", Locale.ENGLISH);
+	private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("EEE d MMM", Locale.ENGLISH);
 	/** The clan's own website: the only place besides the bot's own host a panel link may open. */
 	private static final String CLAN_DOMAIN = "ocage.cc";
 
@@ -84,6 +90,8 @@ class OcagePanel extends PluginPanel
 	private boolean bingoOpen = true;
 	private boolean bossOpen = true;
 	private boolean upcomingOpen = true;
+	/** The standings on show, as the plugin fingerprinted them (null: none, or redraw next time). */
+	private String shownStandings;
 	/** The width the text was last wrapped at. */
 	private int laidOutWidth = -1;
 
@@ -258,6 +266,7 @@ class OcagePanel extends PluginPanel
 
 	void showLoggedOut()
 	{
+		shownStandings = null;
 		status.setText("Log in to the game to link or see your events.");
 		setLinkedControls(false);
 		linkForm.setVisible(false);
@@ -268,6 +277,7 @@ class OcagePanel extends PluginPanel
 
 	void showNotLinked()
 	{
+		shownStandings = null;
 		status.setText("This account isn't linked yet. Linked before? Click Refresh first.");
 		setLinkedControls(false);
 		standings.removeAll();
@@ -285,6 +295,7 @@ class OcagePanel extends PluginPanel
 
 	void showError(String message)
 	{
+		shownStandings = null;  // the next standings clear the error, even unchanged ones
 		setError(message);
 		linkButton.setEnabled(true);
 		relayout();
@@ -296,8 +307,25 @@ class OcagePanel extends PluginPanel
 		error.setVisible(message != null && !message.isEmpty());
 	}
 
+	/** Redraws the standings (after a settings change, e.g. local times). */
 	void showStandings(Api.Me me)
 	{
+		showStandings(me, null);
+	}
+
+	/**
+	 * Shows the standings, unless they're the ones already on show
+	 * ({@code fingerprint}, their JSON): the panel refreshes every minute
+	 * during an event, and rebuilding identical cards is wasted work that can
+	 * also move the sidebar. Null always redraws.
+	 */
+	void showStandings(Api.Me me, String fingerprint)
+	{
+		if (fingerprint != null && fingerprint.equals(shownStandings))
+		{
+			return;
+		}
+		shownStandings = fingerprint;
 		showLinked(me.displayName.equals(me.rsn) ? me.rsn : me.rsn + " (" + me.displayName + ")");
 		standings.removeAll();
 		List<JComponent> bingoCards = new ArrayList<>();
@@ -313,7 +341,7 @@ class OcagePanel extends PluginPanel
 		{
 			for (Api.MeEvent event : me.events)
 			{
-				bossCards.add(eventCard(event));
+				bossCards.add(eventCard(event, me.rsn));
 			}
 		}
 		List<JComponent> upcomingCards = new ArrayList<>();
@@ -449,12 +477,17 @@ class OcagePanel extends PluginPanel
 		}
 		if (bingo.endDate != null)
 		{
-			lines.add(row(text("Ends " + bingo.endDate + " UTC", null)));
+			lines.add(row(text("Ends " + ends(bingo.endDate, plugin.panelZone()), null)));
 		}
 		return card(lines);
 	}
 
-	private JPanel eventCard(Api.MeEvent event)
+	/**
+	 * A boss event: the player's KC (overall and per boss), the event's top
+	 * players by KC with the player's own line added if they're further
+	 * down, then their unique drops.
+	 */
+	private JPanel eventCard(Api.MeEvent event, String rsn)
 	{
 		JPanel lines = column();
 		lines.add(row(bold(event.name)));
@@ -467,6 +500,15 @@ class OcagePanel extends PluginPanel
 		{
 			lines.add(row(indented(text(boss + ": " + kcByBoss.getOrDefault(boss, 0), null))));
 		}
+		List<BoardLine> board = kcLeaderboard(event, rsn);
+		if (!board.isEmpty())
+		{
+			lines.add(row(text("Leaderboard", null)));
+			for (BoardLine line : board)
+			{
+				lines.add(row(indented(line.mine ? bold(line.text) : text(line.text, null))));
+			}
+		}
 		lines.add(row(text("Unique drops: " + event.uniqueDrops + rank(event.dropsRank), null)));
 		if (event.drops != null)
 		{
@@ -477,9 +519,49 @@ class OcagePanel extends PluginPanel
 		}
 		if (event.endDate != null)
 		{
-			lines.add(row(text("Ends " + event.endDate + " UTC", null)));
+			lines.add(row(text("Ends " + ends(event.endDate, plugin.panelZone()), null)));
 		}
 		return card(lines);
+	}
+
+	/** One line of a leaderboard, and whether it's the player's own (shown in bold). */
+	static final class BoardLine
+	{
+		final String text;
+		final boolean mine;
+
+		BoardLine(String text, boolean mine)
+		{
+			this.text = text;
+			this.mine = mine;
+		}
+	}
+
+	/**
+	 * "1. Woox - 100" for each of the event's top players, the player's own
+	 * line in bold. If they're further down, their line is added after the
+	 * top players ("12. Witted - 15"). No KC yet: no line of their own.
+	 * Empty when the bot sent no leaderboard (an older bot) or nobody has KC.
+	 */
+	static List<BoardLine> kcLeaderboard(Api.MeEvent event, String rsn)
+	{
+		List<BoardLine> board = new ArrayList<>();
+		if (event.leaderboard == null || event.leaderboard.isEmpty())
+		{
+			return board;
+		}
+		boolean shown = false;
+		for (Api.MeKcRow row : event.leaderboard)
+		{
+			boolean mine = row.rsn != null && row.rsn.equalsIgnoreCase(rsn);
+			shown |= mine;
+			board.add(new BoardLine(row.rank + ". " + row.rsn + " - " + row.kc, mine));
+		}
+		if (!shown && event.kcRank != null && event.kc > 0)
+		{
+			board.add(new BoardLine(event.kcRank + ". " + rsn + " - " + event.kc, true));
+		}
+		return board;
 	}
 
 	/**
@@ -492,7 +574,7 @@ class OcagePanel extends PluginPanel
 		boolean bingo = !"boss".equals(event.eventType);
 		JPanel lines = column();
 		lines.add(row(bold(event.name)));
-		lines.add(row(text((bingo ? "Bingo" : "Boss event") + " - " + starts(event.startDate), null)));
+		lines.add(row(text((bingo ? "Bingo" : "Boss event") + " - " + starts(event.startDate, plugin.panelZone()), null)));
 		if (bingo)
 		{
 			String stage = signupStage(event);
@@ -528,21 +610,49 @@ class OcagePanel extends PluginPanel
 		return card(lines);
 	}
 
-	/** "starts Fri 7 Nov, 18:00 UTC"; the bot's own text if it can't be read. */
-	static String starts(String startDate)
+	/** "starts Fri 7 Nov, 19:00 CET", in {@code zone}; the bot's own text if it can't be read. */
+	static String starts(String startDate, ZoneId zone)
 	{
 		if (startDate == null || startDate.isEmpty())
 		{
 			return "date to be announced";
 		}
+		return "starts " + when(startDate, zone);
+	}
+
+	/**
+	 * "Sat 7 Nov, 19:00 CET", in {@code zone}. A date-only end date is shown as the UTC date
+	 * ("Sat 7 Nov UTC"): the bot doesn't treat its end time the same everywhere, so no time is implied.
+	 */
+	static String ends(String endDate, ZoneId zone)
+	{
+		if (endDate.length() == 10)
+		{
+			try
+			{
+				return LocalDate.parse(endDate).format(DAY) + " UTC";
+			}
+			catch (DateTimeParseException e)
+			{
+				return endDate + " UTC";
+			}
+		}
+		return when(endDate, zone);
+	}
+
+	/** A bot date ("yyyy-MM-dd HH:mm:ss", or a date for midnight) in {@code zone}; as sent, plus UTC, if unreadable. */
+	private static String when(String botDate, ZoneId zone)
+	{
 		try
 		{
-			String full = startDate.length() == 10 ? startDate + " 00:00:00" : startDate;
-			return "starts " + LocalDateTime.parse(full, BOT_DATE).format(START);
+			LocalDateTime utc = botDate.length() == 10
+				? LocalDate.parse(botDate).atStartOfDay()
+				: LocalDateTime.parse(botDate, BOT_DATE);
+			return utc.atZone(UTC).withZoneSameInstant(zone).format(WHEN);
 		}
 		catch (DateTimeParseException e)
 		{
-			return "starts " + startDate + " UTC";
+			return botDate + " UTC";
 		}
 	}
 

@@ -12,6 +12,7 @@ import java.io.Reader;
 import java.io.Writer;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -19,6 +20,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ScheduledExecutorService;
@@ -52,6 +54,7 @@ import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.config.RuneScapeProfile;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.events.RuneScapeProfileChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
@@ -110,7 +113,8 @@ import okhttp3.OkHttpClient;
 )
 public class OcagePlugin extends Plugin
 {
-	static final String VERSION = "1.0.2";
+	/** Sent to the bot in each request. Keep in step with build.gradle's version. */
+	static final String VERSION = "1.0.3";
 
 	/** "Your Vorkath kill count is: 123." and friends (chest, completion, success, harvest). */
 	private static final Pattern KC_PATTERN = Pattern.compile(
@@ -118,7 +122,7 @@ public class OcagePlugin extends Plugin
 		Pattern.CASE_INSENSITIVE);
 	/** "Your completed Chambers of Xeric count is: 12." / "Your subdued Wintertodt count is: 400." */
 	private static final Pattern COMPLETED_PATTERN = Pattern.compile(
-		"Your (?:completed|subdued) (?<boss>.+?) count is: ?(?<kc>[\\d,]+)\\b");
+		"Your (?:completed|subdued) (?<boss>.+?) count is: ?(?<kc>[\\d,]+)\\b", Pattern.CASE_INSENSITIVE);
 	/** "You have completed 12 hard Treasure Trails." (one clue: "1 hard Treasure Trail."). */
 	static final Pattern CLUE_PATTERN = Pattern.compile(
 		"You have completed (?<count>[\\d,]+) (?<tier>beginner|easy|medium|hard|elite|master) Treasure Trails?\\b",
@@ -126,9 +130,6 @@ public class OcagePlugin extends Plugin
 
 	/** Needs the in-game setting "Collection log - New addition notification". */
 	static final Pattern CLOG_PATTERN = Pattern.compile("New item added to your collection log: (?<item>.+)");
-	/** A new pet (following, or in the backpack), or a duplicate ("you would have been followed"). */
-	static final Pattern PET_PATTERN = Pattern.compile(
-		"You have a funny feeling like you(?<dupe> would have been|'re being| are being) followed|You feel something weird sneaking into your backpack");
 	/** Combat Achievements tiers, lowest first, and the game's points threshold for each. */
 	static final String[] CA_TIERS = {"Easy", "Medium", "Hard", "Elite", "Master", "Grandmaster"};
 	private static final int[] CA_THRESHOLDS = {
@@ -138,20 +139,24 @@ public class OcagePlugin extends Plugin
 	/** The Combat Achievements interfaces: opening any of them is a safe moment to read the tier. */
 	private static final Set<Integer> CA_INTERFACES = Set.of(
 		InterfaceID.CA_OVERVIEW, InterfaceID.CA_TASKS, InterfaceID.CA_BOSSES, InterfaceID.CA_REWARDS);
+	/**
+	 * Where the broadcast of the player's own pet comes: their clan's chat, or their Group Ironman group's.
+	 * Only one naming the player is used (PetNames.broadcastPet); other players' are ignored.
+	 */
+	private static final Set<ChatMessageType> PET_BROADCAST_CHATS = Set.of(
+		ChatMessageType.CLAN_MESSAGE, ChatMessageType.CLAN_GIM_MESSAGE);
 	/** RS-profile config key: the highest CA tier this account has reported. */
 	private static final String CA_TIER_KEY = "caTier";
-	/** A new pet's collection-log message comes with its pet message; this is how far apart they may be. */
-	private static final long PET_NAME_WAIT_MS = 3_000;
 
 	private static final int FLUSH_SECONDS = 5;
 	private static final int BATCH_SIZE = 50;
 	/** Past this many unsent reports (server down for a long time) the oldest are dropped. */
 	private static final int MAX_QUEUE = 1000;
 	/**
-	 * Rules older than this aren't trusted to drop a kill: a boss event set to plugin tracking since they
-	 * were fetched would lose it. The kill waits for fresh rules instead.
+	 * The soonest the rules are fetched again. The bot times its refresh_seconds to the start of the next
+	 * plugin-tracked boss event, so rules that say no event wants kills are trusted until then.
 	 */
-	private static final long KILL_RULES_MAX_AGE_MS = 30_000;
+	private static final int MIN_RULES_REFRESH_SECONDS = 15;
 	/** How long to wait before asking again after the rules couldn't be fetched. */
 	private static final long RULES_RETRY_MS = 60_000;
 	/** Longest wait between upload retries while the server is unreachable or busy. */
@@ -230,12 +235,16 @@ public class OcagePlugin extends Plugin
 	/** Frames still to be captured: the overlay is drawn in them even if the player hid it. */
 	private volatile int capturing;
 
-	/** A pet message waiting (client thread) for the collection-log message that names it. */
-	private long petAt;
+	/** Client thread: a pet message waiting for what names the pet (see {@link PetNames}). */
+	private final PetNames petNames = new PetNames();
 	private boolean petWaiting;
-	/** The last collection-log item and when (client thread), in case it came just before the pet message. */
-	private String lastClogItem;
-	private long lastClogAt;
+	private long petAt;
+	private String petOccurredAt;
+	private boolean petDuplicate;
+	/** Swing thread: when to open the side panel by itself (the "Open the Ocage panel" setting). */
+	private final PanelOpener panelOpener = new PanelOpener();
+	/** The key the last refresh used (null: none): a profile change only refreshes again if it differs. */
+	private volatile String refreshedKey;
 
 	/** Client thread: the CA points last seen this login (0 until the game sends them). */
 	private int caPoints;
@@ -326,9 +335,30 @@ public class OcagePlugin extends Plugin
 		accountHash = null;
 		rsn = null;
 		rules = null;
+		// Start clean if the plugin is turned on again: no stale standings to compare with or redraw from.
+		lastMe = null;
+		refreshedKey = null;
+		rulesRequestedAt = 0;
+		meRequestedAt = 0;
 	}
 
 	// -- Game events (client thread) -------------------------------------------
+
+	/** The time zone the side panel shows event times in: the computer's, or UTC. */
+	ZoneId panelZone()
+	{
+		return config.localTimes() ? ZoneId.systemDefault() : OcagePanel.UTC;
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		Api.Me me = lastMe;
+		if (OcageConfig.GROUP.equals(event.getGroup()) && "localTimes".equals(event.getKey()) && me != null)
+		{
+			SwingUtilities.invokeLater(() -> panel.showStandings(me));
+		}
+	}
 
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
@@ -342,7 +372,11 @@ public class OcagePlugin extends Plugin
 			caPoints = 0;
 			accountHash = null;
 			rsn = null;
-			SwingUtilities.invokeLater(() -> panel.showLoggedOut());
+			SwingUtilities.invokeLater(() ->
+			{
+				panel.showLoggedOut();
+				panelOpener.reset();
+			});
 		}
 	}
 
@@ -458,6 +492,11 @@ public class OcagePlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
+		if (PET_BROADCAST_CHATS.contains(event.getType()))
+		{
+			petBroadcast(Text.removeTags(event.getMessage()));
+			return;
+		}
 		if (event.getType() != ChatMessageType.GAMEMESSAGE && event.getType() != ChatMessageType.SPAM)
 		{
 			return;
@@ -489,9 +528,10 @@ public class OcagePlugin extends Plugin
 	}
 
 	/**
-	 * A pet or a new collection-log item. A new pet is named by the
-	 * collection-log message that comes with it (sent just before or after);
-	 * a duplicate pet has none, so it's reported without a name.
+	 * A pet, a new collection-log item, or an untradeable drop (which may
+	 * name a pet). A pet is reported once {@link PetNames} has its name: at
+	 * the clan broadcast, or after {@link PetNames#WAIT_MS} with the best it
+	 * has (none, if nothing named it for sure).
 	 */
 	private boolean petOrCollectionLog(String message)
 	{
@@ -501,56 +541,69 @@ public class OcagePlugin extends Plugin
 		{
 			String item = clog.group("item").trim();
 			enqueue(Api.Report.clog(newId(), Instant.now().toString(), item));
-			if (petWaiting && now - petAt <= PET_NAME_WAIT_MS)
-			{
-				petWaiting = false;
-				enqueue(Api.Report.pet(newId(), Instant.now().toString(), item));
-			}
-			else
-			{
-				lastClogItem = item;
-				lastClogAt = now;
-			}
+			petNames.add(PetNames.Kind.CLOG, item, now);
 			return true;
 		}
-		Matcher pet = PET_PATTERN.matcher(message);
+		String untradeable = PetNames.untradeableItem(message);
+		if (untradeable != null)
+		{
+			petNames.add(PetNames.Kind.UNTRADEABLE, untradeable, now);
+			return true;
+		}
+		Matcher pet = PetNames.PET_PATTERN.matcher(message);
 		if (!pet.find())
 		{
 			return false;
 		}
-		boolean duplicate = " would have been".equals(pet.group("dupe"));
-		if (duplicate)
+		if (petWaiting)
 		{
-			enqueue(Api.Report.pet(newId(), Instant.now().toString(), null));
+			finishPet();  // a second pet before the first was named: report the first as it stands
 		}
-		else if (lastClogItem != null && now - lastClogAt <= PET_NAME_WAIT_MS)
-		{
-			enqueue(Api.Report.pet(newId(), Instant.now().toString(), lastClogItem));
-			lastClogItem = null;
-		}
-		else
-		{
-			petWaiting = true;
-			petAt = now;
-			clientThread.invokeLater(this::petTimeout);
-		}
+		petWaiting = true;
+		petAt = now;
+		petOccurredAt = Instant.now().toString();
+		petDuplicate = " would have been".equals(pet.group("dupe"));
+		clientThread.invokeLater(this::petTimeout);
 		return true;
 	}
 
-	/** Client thread: a new pet whose collection-log message never came (the setting is off). */
+	/** Client thread: a clan broadcast; the player's own pet one names their pet. */
+	private void petBroadcast(String message)
+	{
+		String pet = PetNames.broadcastPet(message, rsn);
+		if (pet == null)
+		{
+			return;
+		}
+		petNames.add(PetNames.Kind.BROADCAST, pet, System.currentTimeMillis());
+		if (petWaiting && petNames.hasBroadcastSince(petAt))
+		{
+			finishPet();
+		}
+	}
+
+	/** Client thread: reports the waiting pet once its wait is over. */
 	private boolean petTimeout()
 	{
 		if (!petWaiting)
 		{
 			return true;
 		}
-		if (System.currentTimeMillis() - petAt < PET_NAME_WAIT_MS)
+		if (System.currentTimeMillis() - petAt < PetNames.WAIT_MS)
 		{
 			return false;  // invokeLater calls again next tick
 		}
-		petWaiting = false;
-		enqueue(Api.Report.pet(newId(), Instant.now().toString(), null));
+		finishPet();
 		return true;
+	}
+
+	/** Client thread: reports the waiting pet, named if anything named it for sure. */
+	private void finishPet()
+	{
+		petWaiting = false;
+		String name = petNames.nameFor(petAt, petDuplicate);
+		petNames.clear();
+		enqueue(Api.Report.pet(newId(), petOccurredAt, name, petDuplicate));
 	}
 
 	/** "You have completed 12 hard Treasure Trails." - reported as a kill of "Clue Scroll (Hard)". */
@@ -863,6 +916,7 @@ public class OcagePlugin extends Plugin
 		if (changed)
 		{
 			lastMe = null;
+			SwingUtilities.invokeLater(panelOpener::reset);  // a new login: the panel may open once again
 		}
 		accountHash = String.valueOf(hash);
 		rsn = player.getName();
@@ -910,7 +964,8 @@ public class OcagePlugin extends Plugin
 	@Subscribe
 	public void onRuneScapeProfileChanged(RuneScapeProfileChanged event)
 	{
-		if (accountHash != null)
+		// Only when the key differs from the last refresh's: usually the login's refresh already had it.
+		if (accountHash != null && !Objects.equals(currentKey(), refreshedKey))
 		{
 			executor.execute(this::refresh);
 		}
@@ -989,6 +1044,7 @@ public class OcagePlugin extends Plugin
 		{
 			return;
 		}
+		refreshedKey = key;
 		if (key == null)
 		{
 			SwingUtilities.invokeLater(() -> panel.showNotLinked());
@@ -1046,7 +1102,17 @@ public class OcagePlugin extends Plugin
 						clientThread.invokeLater(() -> changes.forEach(OcagePlugin.this::chat));
 					}
 				}
-				SwingUtilities.invokeLater(() -> panel.showStandings(value));
+				// The panel skips redrawing standings that haven't changed (it refreshes every minute in an event).
+				String fingerprint = gson.toJson(value);
+				SwingUtilities.invokeLater(() ->
+				{
+					panel.showStandings(value, fingerprint);
+					// Opens our own panel with RuneLite's sidebar API, at most once per login or running event.
+					if (panelOpener.shouldOpen(config.openPanel(), value))
+					{
+						clientToolbar.openPanel(navButton);
+					}
+				});
 			}
 
 			@Override
@@ -1257,7 +1323,7 @@ public class OcagePlugin extends Plugin
 	{
 		Api.Rules current = rules;
 		long sinceAsked = System.currentTimeMillis() - rulesRequestedAt;
-		long due = current == null ? RULES_RETRY_MS : Math.max(60, current.refreshSeconds) * 1000L;
+		long due = current == null ? RULES_RETRY_MS : rulesLifetimeMs(current);
 		if (currentKey() != null && sinceAsked >= due)
 		{
 			refresh();
@@ -1315,17 +1381,15 @@ public class OcagePlugin extends Plugin
 					}
 					if (!wantsKills(current))
 					{
-						long now = System.currentTimeMillis();
-						if (now - rulesReceivedAt > KILL_RULES_MAX_AGE_MS)
+						if (System.currentTimeMillis() - rulesReceivedAt > rulesLifetimeMs(current)
+							|| current.eventStartedBy(pending.report.occurredAt))
 						{
-							// An event may have started since: ask again, and keep the kill until we know.
-							if (now - rulesRequestedAt > FLUSH_SECONDS * 1000L)
-							{
-								refresh();
-							}
+							// Out of date (a refresh failed), or an event has started since they were fetched:
+							// keep the kill until tick fetches them again (the bot times that refresh to the start).
 							continue;
 						}
-						it.remove();  // no plugin-tracked boss event: nothing would count it
+						// No plugin-tracked boss event was on when it happened: nothing would count it.
+						it.remove();
 						queueDirty = true;
 						continue;
 					}
@@ -1435,6 +1499,12 @@ public class OcagePlugin extends Plugin
 		queueDirty = true;
 	}
 
+	/** How long rules are good for: the bot's refresh_seconds, which it shortens ahead of an event start. */
+	static long rulesLifetimeMs(Api.Rules rules)
+	{
+		return Math.max(MIN_RULES_REFRESH_SECONDS, rules.refreshSeconds) * 1000L;
+	}
+
 	/**
 	 * Whether kills are worth sending: only while a boss event counts plugin
 	 * reports (the rules list them). The bot matches the boss itself and
@@ -1541,10 +1611,14 @@ public class OcagePlugin extends Plugin
 		return n + suffix;
 	}
 
-	/** Client thread: one "Ocage:" chat line. */
+	/**
+	 * Client thread: one "Ocage:" chat line. The text is escaped: event, team
+	 * and boss names come from the bot, and a "<col=...>" in one must show as
+	 * written, not restyle the chat.
+	 */
 	private void chat(String message)
 	{
-		client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "<col=1f7a70>Ocage:</col> " + message, null);
+		client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "<col=1f7a70>Ocage:</col> " + Text.escapeJagex(message), null);
 	}
 
 	/** Client thread: "Ocage: Skeletal visage counted for Vorkath Week." */
@@ -1555,18 +1629,14 @@ public class OcagePlugin extends Plugin
 			String what = c.itemId != null
 				? itemManager.getItemComposition(c.itemId).getName() + (c.quantity != null && c.quantity > 1 ? " x" + c.quantity : "")
 				: "+" + c.kc + " " + c.boss + " KC";
-			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
-				"<col=1f7a70>Ocage:</col> " + what + " counted for " + c.event + ".", null);
+			chat(what + " counted for " + c.event + ".");
 		}
 	}
 
 	/** Client thread: "Ocage: Congratulations on the Elite Combat Achievements tier!" */
 	private void showNotices(List<String> notices)
 	{
-		for (String notice : notices)
-		{
-			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "<col=1f7a70>Ocage:</col> " + Text.escapeJagex(notice), null);
-		}
+		notices.forEach(this::chat);
 	}
 
 	private static String newId()

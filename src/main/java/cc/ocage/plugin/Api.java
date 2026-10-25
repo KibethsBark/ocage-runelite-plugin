@@ -1,6 +1,8 @@
 package cc.ocage.plugin;
 
 import com.google.gson.annotations.SerializedName;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
 
@@ -51,6 +53,31 @@ final class Api
 		List<Bingo> bingo;
 		@SerializedName("refresh_seconds")
 		int refreshSeconds;
+		/** When the next plugin-tracked boss event starts, ISO 8601 UTC (null: none; older bots don't send it). */
+		@SerializedName("next_event_start")
+		String nextEventStart;
+
+		/**
+		 * Whether a plugin-tracked boss event has started by {@code occurredAt}
+		 * (ISO 8601), which these rules can't yet list: a kill from then on waits
+		 * for fresher rules instead of being dropped. An unreadable time counts
+		 * as started, so the kill waits and the bot decides.
+		 */
+		boolean eventStartedBy(String occurredAt)
+		{
+			if (nextEventStart == null)
+			{
+				return false;
+			}
+			try
+			{
+				return !Instant.parse(occurredAt).isBefore(Instant.parse(nextEventStart));
+			}
+			catch (DateTimeParseException | NullPointerException e)
+			{
+				return true;
+			}
+		}
 	}
 
 	static final class RulesEvent
@@ -110,9 +137,11 @@ final class Api
 		final Boolean screenshot;
 		/** CA only: the tier before, when the plugin saw the tier rise in game (not a sync). */
 		final String previous;
+		/** Pet only: one the player already has ("you would have been followed"). */
+		final Boolean duplicate;
 
 		private Report(String id, String type, String occurredAt, String source, Integer kc, List<Item> items,
-			String lootType, Long totalValue, Boolean screenshot, String previous)
+			String lootType, Long totalValue, Boolean screenshot, String previous, Boolean duplicate)
 		{
 			this.id = id;
 			this.type = type;
@@ -124,42 +153,43 @@ final class Api
 			this.totalValue = totalValue;
 			this.screenshot = screenshot;
 			this.previous = previous;
+			this.duplicate = duplicate;
 		}
 
 		static Report kill(String id, String occurredAt, String boss, int kc)
 		{
-			return new Report(id, "kill", occurredAt, boss, kc, null, null, null, null, null);
+			return new Report(id, "kill", occurredAt, boss, kc, null, null, null, null, null, null);
 		}
 
-		/** A pet; {@code name} is null when the game didn't say which (a duplicate pet). */
-		static Report pet(String id, String occurredAt, String name)
+		/** A pet; {@code name} is null when the plugin couldn't tell which (see OcagePlugin.petName). */
+		static Report pet(String id, String occurredAt, String name, boolean duplicate)
 		{
-			return new Report(id, "pet", occurredAt, name, null, null, null, null, null, null);
+			return new Report(id, "pet", occurredAt, name, null, null, null, null, null, null, duplicate ? true : null);
 		}
 
 		/** A new collection-log item (the game's "New item added to your collection log" message). */
 		static Report clog(String id, String occurredAt, String name)
 		{
-			return new Report(id, "clog", occurredAt, name, null, null, null, null, null, null);
+			return new Report(id, "clog", occurredAt, name, null, null, null, null, null, null, null);
 		}
 
 		static Report loot(String id, String occurredAt, String source, String lootType, long totalValue, List<Item> items,
 			boolean screenshot)
 		{
-			return new Report(id, "loot", occurredAt, source, null, items, lootType, totalValue, screenshot ? true : null, null);
+			return new Report(id, "loot", occurredAt, source, null, items, lootType, totalValue, screenshot ? true : null, null, null);
 		}
 
 		/** The highest Combat Achievements tier the account has reached ("None" if none yet). */
 		/** {@code previous}: the tier before, if the plugin saw it rise in game; null for a sync. */
 		static Report ca(String id, String occurredAt, String tier, String previous)
 		{
-			return new Report(id, "ca", occurredAt, tier, null, null, null, null, null, previous);
+			return new Report(id, "ca", occurredAt, tier, null, null, null, null, null, previous, null);
 		}
 
 		/** This loot report with only {@code kept} items (the rest of its fields unchanged). */
 		Report withItems(List<Item> kept)
 		{
-			return new Report(id, type, occurredAt, source, kc, kept, lootType, totalValue, screenshot, previous);
+			return new Report(id, type, occurredAt, source, kc, kept, lootType, totalValue, screenshot, previous, duplicate);
 		}
 	}
 
@@ -252,14 +282,25 @@ final class Api
 		int kc;
 		@SerializedName("kc_by_boss")
 		Map<String, Integer> kcByBoss;
+		/** Overall KC rank; tied players share one. */
 		@SerializedName("kc_rank")
 		Integer kcRank;
+		/** The top players by KC gained, best first (older bots don't send it). */
+		List<MeKcRow> leaderboard;
 		@SerializedName("unique_drops")
 		int uniqueDrops;
 		/** The unique items gained, by name (older bots don't send it). */
 		List<MeDrop> drops;
 		@SerializedName("drops_rank")
 		Integer dropsRank;
+	}
+
+	static final class MeKcRow
+	{
+		/** Tied players share a rank. */
+		int rank;
+		String rsn;
+		int kc;
 	}
 
 	static final class MeUpcoming
