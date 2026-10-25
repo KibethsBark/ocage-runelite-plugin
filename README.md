@@ -32,7 +32,7 @@ Outside a clan event, kills aren't sent. Drops are only sent when the clan's rul
 | Screenshot bingo drops | Off by default. On: a bingo drop is submitted with a screenshot of your game screen as its proof. Off: it's still submitted, without a picture |
 | Bingo standing updates | A chat message when your team's points or rank change |
 | Screenshot chat | What bingo screenshots hide: private messages (the default), the whole chat box, or nothing |
-| Open the Ocage panel | Opens the Ocage side panel by itself: **At login** (once each login), **During events** (once for each running bingo or boss event you're in, not upcoming ones) or **Never** (the default). It's opened once and never kept open |
+| Sidebar button | When the Ocage button shows in RuneLite's sidebar: **Always** (the default), **During events** (only while a bingo you're on a team for, or a boss event, is running) or **Never**. It always shows while your account isn't linked, so you can link. Hiding it doesn't stop the plugin reporting |
 | **Bingo overlay** section | |
 | Show on screen | The overlay while you play. Off or on, bingo drop screenshots always include it, but only while Screenshot bingo drops is on |
 | Style | Full (event, team, password, time) or Compact (event and password); drop screenshots always use Full |

@@ -42,16 +42,16 @@ public interface OcageConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "openPanel",
-		name = "Open the Ocage panel",
-		description = "Opens the Ocage side panel by itself. At login: once each time you log in. "
-			+ "During events: once for each running bingo you're on a team for, or boss event (not upcoming ones). "
-			+ "Never: only when you click its button. It's opened once, never kept open: close it and it stays closed.",
+		keyName = "sidebarButton",
+		name = "Sidebar button",
+		description = "When the Ocage button shows in RuneLite's sidebar. Always; During events: only while a bingo "
+			+ "you're on a team for, or a boss event, is running; Never. It always shows while this account isn't "
+			+ "linked, to link it. Hiding it doesn't stop the plugin reporting.",
 		position = 6
 	)
-	default PanelOpen openPanel()
+	default SidebarButton sidebarButton()
 	{
-		return PanelOpen.NEVER;
+		return SidebarButton.ALWAYS;
 	}
 
 	@ConfigItem(

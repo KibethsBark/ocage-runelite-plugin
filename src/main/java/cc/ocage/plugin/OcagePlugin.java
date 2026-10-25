@@ -241,8 +241,12 @@ public class OcagePlugin extends Plugin
 	private long petAt;
 	private String petOccurredAt;
 	private boolean petDuplicate;
-	/** Swing thread: when to open the side panel by itself (the "Open the Ocage panel" setting). */
-	private final PanelOpener panelOpener = new PanelOpener();
+	/** Whether the logged-in account has a link key, as last checked (null: not checked since login). */
+	private volatile Boolean linked;
+	/** Swing thread: whether the sidebar button is added ("Sidebar button" setting). */
+	private boolean buttonShown;
+	/** Between startUp and shutDown: a queued button update mustn't add it back after shutdown. */
+	private volatile boolean running;
 	/** The key the last refresh used (null: none): a profile change only refreshes again if it differs. */
 	private volatile String refreshedKey;
 
@@ -304,7 +308,9 @@ public class OcagePlugin extends Plugin
 		panel = new OcagePanel(this, api.baseUrl(), ApiUrl.isProduction(api.baseUrl()));
 		BufferedImage icon = ImageUtil.loadImageResource(getClass(), "icon.png");
 		navButton = NavigationButton.builder().tooltip("Ocage").icon(icon).priority(8).panel(panel).build();
-		clientToolbar.addNavigation(navButton);
+		running = true;
+		linked = null;
+		updateSidebarButton();
 		overlayManager.add(overlay);
 		try
 		{
@@ -326,7 +332,9 @@ public class OcagePlugin extends Plugin
 	{
 		flushTask.cancel(false);
 		saveQueue();
+		running = false;
 		clientToolbar.removeNavigation(navButton);
+		SwingUtilities.invokeLater(() -> buttonShown = false);
 		overlayManager.remove(overlay);
 		synchronized (shots)
 		{
@@ -350,9 +358,41 @@ public class OcagePlugin extends Plugin
 		return config.localTimes() ? ZoneId.systemDefault() : OcagePanel.UTC;
 	}
 
+	/**
+	 * Adds or removes the sidebar button as the "Sidebar button" setting says,
+	 * for the account's state now (logged in, linked, a running event). Only
+	 * our own button, with ClientToolbar's add and remove: nothing else in the
+	 * sidebar changes. Any thread; the change runs on the Swing thread.
+	 */
+	private void updateSidebarButton()
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			boolean unlinked = accountHash != null && Boolean.FALSE.equals(linked);
+			boolean show = running && config.sidebarButton().shown(unlinked, lastMe);
+			if (show == buttonShown)
+			{
+				return;
+			}
+			buttonShown = show;
+			if (show)
+			{
+				clientToolbar.addNavigation(navButton);
+			}
+			else
+			{
+				clientToolbar.removeNavigation(navButton);
+			}
+		});
+	}
+
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
+		if (OcageConfig.GROUP.equals(event.getGroup()) && "sidebarButton".equals(event.getKey()))
+		{
+			updateSidebarButton();
+		}
 		Api.Me me = lastMe;
 		if (OcageConfig.GROUP.equals(event.getGroup()) && "localTimes".equals(event.getKey()) && me != null)
 		{
@@ -372,11 +412,9 @@ public class OcagePlugin extends Plugin
 			caPoints = 0;
 			accountHash = null;
 			rsn = null;
-			SwingUtilities.invokeLater(() ->
-			{
-				panel.showLoggedOut();
-				panelOpener.reset();
-			});
+			linked = null;
+			SwingUtilities.invokeLater(() -> panel.showLoggedOut());
+			updateSidebarButton();
 		}
 	}
 
@@ -916,7 +954,7 @@ public class OcagePlugin extends Plugin
 		if (changed)
 		{
 			lastMe = null;
-			SwingUtilities.invokeLater(panelOpener::reset);  // a new login: the panel may open once again
+			linked = null;  // checked again by the refresh below
 		}
 		accountHash = String.valueOf(hash);
 		rsn = player.getName();
@@ -988,6 +1026,8 @@ public class OcagePlugin extends Plugin
 			public void ok(Api.LinkResponse value)
 			{
 				configManager.setRSProfileConfiguration(OcageConfig.GROUP, keyName(), value.token);
+				linked = true;
+				updateSidebarButton();
 				SwingUtilities.invokeLater(() -> panel.showLinked(value.rsn));
 				// Send the tier this account already has to the new key's server, or ask for a sync.
 				clientThread.invokeLater(() ->
@@ -1016,7 +1056,9 @@ public class OcagePlugin extends Plugin
 		String hash = accountHash;
 		configManager.unsetRSProfileConfiguration(OcageConfig.GROUP, keyName());
 		rules = null;
+		linked = false;
 		SwingUtilities.invokeLater(() -> panel.showNotLinked());
+		updateSidebarButton();
 		if (key != null)
 		{
 			api.unlink(key, hash, new OcageClient.Result<Void>()
@@ -1045,6 +1087,8 @@ public class OcagePlugin extends Plugin
 			return;
 		}
 		refreshedKey = key;
+		linked = key != null;
+		updateSidebarButton();
 		if (key == null)
 		{
 			SwingUtilities.invokeLater(() -> panel.showNotLinked());
@@ -1104,15 +1148,8 @@ public class OcagePlugin extends Plugin
 				}
 				// The panel skips redrawing standings that haven't changed (it refreshes every minute in an event).
 				String fingerprint = gson.toJson(value);
-				SwingUtilities.invokeLater(() ->
-				{
-					panel.showStandings(value, fingerprint);
-					// Opens our own panel with RuneLite's sidebar API, at most once per login or running event.
-					if (panelOpener.shouldOpen(config.openPanel(), value))
-					{
-						clientToolbar.openPanel(navButton);
-					}
-				});
+				SwingUtilities.invokeLater(() -> panel.showStandings(value, fingerprint));
+				updateSidebarButton();  // "During events": an event may have started or ended
 			}
 
 			@Override
@@ -1202,6 +1239,8 @@ public class OcagePlugin extends Plugin
 			{
 				configManager.unsetRSProfileConfiguration(OcageConfig.GROUP, keyName());
 				rules = null;
+				linked = false;
+				updateSidebarButton();
 				String message = failure.banned()
 					? "This account is banned from the Ocage plugin, so it has been unlinked and stopped sending. "
 						+ "If you think that's wrong, ask a moderator; once you're unbanned, run /plugin link for a new code."
