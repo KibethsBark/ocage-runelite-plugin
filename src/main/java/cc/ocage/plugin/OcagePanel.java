@@ -5,6 +5,7 @@ import java.awt.Color;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.Cursor;
+import java.awt.Dimension;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
@@ -36,6 +37,7 @@ import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JProgressBar;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingConstants;
@@ -90,6 +92,7 @@ class OcagePanel extends PluginPanel
 	private boolean bingoOpen = true;
 	private boolean bossOpen = true;
 	private boolean upcomingOpen = true;
+	private boolean tasksOpen = true;
 	/** The standings on show, as the plugin fingerprinted them (null: none, or redraw next time). */
 	private String shownStandings;
 	/** The width the text was last wrapped at. */
@@ -352,9 +355,21 @@ class OcagePanel extends PluginPanel
 				upcomingCards.add(upcomingCard(event));
 			}
 		}
-		if (bingoCards.isEmpty() && bossCards.isEmpty())
+		List<JComponent> taskCards = new ArrayList<>();
+		if (me.tasks != null)
+		{
+			for (Api.MeTask task : me.tasks)
+			{
+				taskCards.add(taskCard(task));
+			}
+		}
+		if (bingoCards.isEmpty() && bossCards.isEmpty() && taskCards.isEmpty())
 		{
 			standings.add(row(text("No active events right now.", null)));
+		}
+		if (!taskCards.isEmpty())
+		{
+			standings.add(row(section("Your tasks", taskCards, tasksOpen, open -> tasksOpen = open)));
 		}
 		if (!bingoCards.isEmpty())
 		{
@@ -571,10 +586,13 @@ class OcagePanel extends PluginPanel
 	 */
 	private JPanel upcomingCard(Api.MeUpcoming event)
 	{
-		boolean bingo = !"boss".equals(event.eventType);
+		boolean boss = "boss".equals(event.eventType);
+		boolean advent = "advent".equals(event.eventType);
+		boolean bingo = !boss && !advent;
 		JPanel lines = column();
 		lines.add(row(bold(event.name)));
-		lines.add(row(text((bingo ? "Bingo" : "Boss event") + " - " + starts(event.startDate, plugin.panelZone()), null)));
+		String type = boss ? "Boss event" : advent ? "Advent calendar" : "Bingo";
+		lines.add(row(text(type + " - " + starts(event.startDate, plugin.panelZone()), null)));
 		if (bingo)
 		{
 			String stage = signupStage(event);
@@ -589,7 +607,7 @@ class OcagePanel extends PluginPanel
 				lines.add(row(text("Your team: " + event.team, null)));
 			}
 		}
-		else
+		else if (boss)
 		{
 			if (event.bosses != null && !event.bosses.isEmpty())
 			{
@@ -682,25 +700,80 @@ class OcagePanel extends PluginPanel
 	/** "Sign up on ocage.cc" while sign-ups are open and the player isn't in, else "View on ocage.cc". */
 	private JComponent link(Api.MeUpcoming event)
 	{
-		String host = linkHost(event.url, apiUrl);
+		boolean signUp = "signup_open".equals(event.status) && Boolean.FALSE.equals(event.signedUp);
+		return link(event.url, signUp ? "Sign up on " : "View on ");
+	}
+
+	/** "View on ocage.cc", opening {@code url}; null if the panel may not open it (see linkHost). */
+	private JComponent link(String url, String prefix)
+	{
+		String host = linkHost(url, apiUrl);
 		if (host == null)
 		{
 			return null;
 		}
-		boolean signUp = "signup_open".equals(event.status) && Boolean.FALSE.equals(event.signedUp);
-		JLabel label = new JLabel((signUp ? "Sign up on " : "View on ") + host);
+		JLabel label = new JLabel(prefix + host);
 		label.setForeground(ColorScheme.GRAND_EXCHANGE_LIMIT);
 		label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-		label.setToolTipText(event.url);
+		label.setToolTipText(url);
 		label.addMouseListener(new MouseAdapter()
 		{
 			@Override
 			public void mouseClicked(MouseEvent e)
 			{
-				LinkBrowser.browse(event.url);
+				LinkBrowser.browse(url);
 			}
 		});
 		return label;
+	}
+
+	/**
+	 * A task (an advent door so far): where it's from, what to do, a detail line coloured by its
+	 * status, a bar when it has a count, and a link to it on the website.
+	 */
+	private JPanel taskCard(Api.MeTask task)
+	{
+		JPanel lines = column();
+		if (task.source != null)
+		{
+			lines.add(row(text(task.source, ColorScheme.LIGHT_GRAY_COLOR)));
+		}
+		lines.add(row(bold(task.title == null ? "" : task.title)));
+		if (task.detail != null && !task.detail.isEmpty())
+		{
+			lines.add(row(text(task.detail, taskColor(task.status))));
+		}
+		if (task.progress != null && task.target != null && task.target > 0)
+		{
+			lines.add(row(bar(task.progress, task.target)));
+		}
+		JComponent link = link(task.url, "View on ");
+		if (link != null)
+		{
+			lines.add(row(link));
+		}
+		return card(lines);
+	}
+
+	static Color taskColor(String status)
+	{
+		if ("done".equals(status))
+		{
+			return ColorScheme.PROGRESS_COMPLETE_COLOR;
+		}
+		return "pending".equals(status) ? ColorScheme.PROGRESS_INPROGRESS_COLOR : null;
+	}
+
+	/** A thin progress bar: {@code value} of {@code max}, clamped. */
+	private static JComponent bar(int value, int max)
+	{
+		JProgressBar bar = new JProgressBar(0, max);
+		bar.setValue(Math.max(0, Math.min(value, max)));
+		bar.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+		bar.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		bar.setBorderPainted(false);
+		bar.setPreferredSize(new Dimension(0, 6));
+		return bar;
 	}
 
 	/**

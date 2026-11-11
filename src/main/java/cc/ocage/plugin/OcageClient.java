@@ -3,6 +3,13 @@ package cc.ocage.plugin;
 import com.google.gson.Gson;
 import com.google.gson.JsonParseException;
 import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
+import java.net.UnknownHostException;
+import java.security.cert.CertificateException;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.net.ssl.SSLException;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -68,6 +75,12 @@ final class OcageClient
 	private final Gson gson;
 	private final String baseUrl;
 	private final String userAgent;
+	/**
+	 * The last connection problem written to the log, so a player who's
+	 * offline gets one warning per kind of problem, not one per request.
+	 * Cleared once a request gets through.
+	 */
+	private final AtomicReference<String> loggedProblem = new AtomicReference<>();
 
 	OcageClient(OkHttpClient http, Gson gson, String baseUrl, String version)
 	{
@@ -136,13 +149,19 @@ final class OcageClient
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
-				log.debug("Ocage API unreachable: {}", request.url(), e);
-				result.fail(new Failure(0, null, "Couldn't reach the Ocage server."));
+				String problem = unreachable(e, request.url().host());
+				// A warning, so it's in the player's client.log when they report a problem.
+				if (!problem.equals(loggedProblem.getAndSet(problem)))
+				{
+					log.warn("Ocage API unreachable ({}): {} [{}]", request.url(), problem, chain(e));
+				}
+				result.fail(new Failure(0, null, problem));
 			}
 
 			@Override
 			public void onResponse(Call call, Response response)
 			{
+				loggedProblem.set(null);
 				try (ResponseBody body = response.body())
 				{
 					String text = body == null ? "" : body.string();
@@ -160,6 +179,56 @@ final class OcageClient
 				}
 			}
 		});
+	}
+
+	/**
+	 * What to tell the player when no answer came back at all, by cause:
+	 * each one points somewhere different (their connection, a firewall or
+	 * antivirus, the server). Looks through the exception's causes, since
+	 * OkHttp often wraps the real one.
+	 */
+	static String unreachable(IOException e, String host)
+	{
+		for (Throwable t = e; t != null; t = t.getCause() == t ? null : t.getCause())
+		{
+			if (t instanceof UnknownHostException)
+			{
+				return "Couldn't find " + host + ". Check your internet connection.";
+			}
+			if (t instanceof SSLException || t instanceof CertificateException)
+			{
+				return "Couldn't verify the Ocage server's certificate. Antivirus or network filtering can cause this.";
+			}
+			if (t instanceof ConnectException || t instanceof NoRouteToHostException)
+			{
+				return "Couldn't connect to the Ocage server. It may be down, or a firewall is blocking RuneLite.";
+			}
+			if (t instanceof InterruptedIOException)
+			{
+				// SocketTimeoutException, and OkHttp's own call timeout.
+				return "The Ocage server didn't answer in time. Try again in a minute.";
+			}
+		}
+		return "Couldn't reach the Ocage server (" + e.getClass().getSimpleName() + ").";
+	}
+
+	/** "SSLHandshakeException: PKIX path building failed <- CertPathBuilderException: ..." for the log. */
+	static String chain(Throwable e)
+	{
+		StringBuilder text = new StringBuilder();
+		for (Throwable t = e; t != null; t = t.getCause() == t ? null : t.getCause())
+		{
+			if (text.length() > 0)
+			{
+				text.append(" <- ");
+			}
+			text.append(t.getClass().getSimpleName());
+			if (t.getMessage() != null)
+			{
+				text.append(": ").append(t.getMessage());
+			}
+		}
+		return text.toString();
 	}
 
 	private Failure failure(String text, int status)

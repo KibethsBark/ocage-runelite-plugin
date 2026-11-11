@@ -4,15 +4,41 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import com.google.gson.Gson;
 import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.List;
+import net.runelite.client.ui.ColorScheme;
 import org.junit.Test;
 
 public class OcagePanelTest
 {
 	private static final String API = "https://api.ocage.cc";
 	private static final ZoneId PARIS = ZoneId.of("Europe/Paris");
+
+	@Test
+	public void tasksAreReadFromTheBotsStandings()
+	{
+		Api.Me me = new Gson().fromJson("{\"rsn\": \"Alice\", \"display_name\": \"Alice\", \"tasks\": ["
+			+ "{\"source\": \"Advent · Door 8 · Medium\", \"title\": \"Kill Zulrah 20 times\", \"status\": \"open\","
+			+ " \"detail\": \"12 / 20 Zulrah KC\", \"progress\": 12, \"target\": 20, \"url\": \"https://ocage.cc/events/3\"}]}",
+			Api.Me.class);
+		assertEquals(1, me.tasks.size());
+		Api.MeTask task = me.tasks.get(0);
+		assertEquals("Kill Zulrah 20 times", task.title);
+		assertEquals(Integer.valueOf(12), task.progress);
+		assertEquals(Integer.valueOf(20), task.target);
+		// An older bot sends no tasks at all: the section just doesn't show.
+		assertNull(new Gson().fromJson("{\"rsn\": \"Alice\", \"display_name\": \"Alice\"}", Api.Me.class).tasks);
+	}
+
+	@Test
+	public void aTasksDetailIsColouredByItsStatus()
+	{
+		assertEquals(ColorScheme.PROGRESS_COMPLETE_COLOR, OcagePanel.taskColor("done"));
+		assertEquals(ColorScheme.PROGRESS_INPROGRESS_COLOR, OcagePanel.taskColor("pending"));
+		assertNull(OcagePanel.taskColor("open"));
+	}
 
 	@Test
 	public void startsReadsTheBotsUtcDates()

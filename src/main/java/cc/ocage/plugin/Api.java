@@ -244,6 +244,8 @@ final class Api
 		List<MeBingo> bingo;
 		/** Events that haven't started yet, soonest first (older bots don't send it). */
 		List<MeUpcoming> upcoming;
+		/** The player's open tasks across events, e.g. advent doors (older bots don't send it). */
+		List<MeTask> tasks;
 		/** When to ask again: shorter while a bingo is on (older bots don't send it). */
 		@SerializedName("refresh_seconds")
 		Integer refreshSeconds;
@@ -303,10 +305,31 @@ final class Api
 		int kc;
 	}
 
+	/**
+	 * One of the player's tasks (an advent door so far): generic on purpose, so the bot can
+	 * add other kinds without a plugin release.
+	 */
+	static final class MeTask
+	{
+		/** Where it's from, e.g. "Advent · Door 8 · Medium". */
+		String source;
+		/** What to do. */
+		String title;
+		/** "open", "pending" (proof waiting for review) or "done". */
+		String status;
+		/** One line under the title, e.g. "12 / 20 Vorkath KC"; may be null. */
+		String detail;
+		/** Progress toward target, for a bar; both null when there's no count. */
+		Integer progress;
+		Integer target;
+		/** Where to see it on the website, if the bot knows it. */
+		String url;
+	}
+
 	static final class MeUpcoming
 	{
 		String name;
-		/** "bingo" or "boss". */
+		/** "bingo", "boss" or "advent". */
 		@SerializedName("event_type")
 		String eventType;
 		/** UTC, "YYYY-MM-DD HH:MM:SS"; null while it has no date. */

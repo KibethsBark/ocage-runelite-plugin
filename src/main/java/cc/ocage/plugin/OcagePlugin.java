@@ -114,7 +114,7 @@ import okhttp3.OkHttpClient;
 public class OcagePlugin extends Plugin
 {
 	/** Sent to the bot in each request. Keep in step with build.gradle's version. */
-	static final String VERSION = "1.0.3";
+	static final String VERSION = "1.0.4";
 
 	/** "Your Vorkath kill count is: 123." and friends (chest, completion, success, harvest). */
 	private static final Pattern KC_PATTERN = Pattern.compile(
