@@ -51,6 +51,15 @@ final class Api
 		List<RulesEvent> events;
 		/** Active bingo events the player is on a team for (older bots don't send it). */
 		List<Bingo> bingo;
+		/** Lower-cased item names to report whatever they're worth: an open advent door wants them (1.0.5). */
+		@SerializedName("item_names")
+		List<String> itemNames;
+		/** Loot Tracker sources to report every entry of, even with nothing worth keeping (1.0.5). */
+		@SerializedName("loot_sources")
+		List<String> lootSources;
+		/** Skills whose total XP to report: an open advent door counts their XP (1.0.5). */
+		@SerializedName("xp_skills")
+		List<XpSkill> xpSkills;
 		@SerializedName("refresh_seconds")
 		int refreshSeconds;
 		/** When the next plugin-tracked boss event starts, ISO 8601 UTC (null: none; older bots don't send it). */
@@ -78,6 +87,14 @@ final class Api
 				return true;
 			}
 		}
+	}
+
+	static final class XpSkill
+	{
+		/** As RuneLite's Skill names it, e.g. "Runecraft". */
+		String skill;
+		/** The least XP an open door still needs: report as soon as this much is gained. */
+		int remaining;
 	}
 
 	static final class RulesEvent
@@ -139,9 +156,30 @@ final class Api
 		final String previous;
 		/** Pet only: one the player already has ("you would have been followed"). */
 		final Boolean duplicate;
+		/** xp only: the skill's total XP. */
+		final Integer xp;
+		/** Kill only: the fight's length from the game's "Fight duration" line, in milliseconds (1.0.5). */
+		@SerializedName("duration_ms")
+		final Long durationMs;
+		/** Kill only: players in the instance at the kill; null outside an instance (1.0.5). */
+		@SerializedName("team_size")
+		final Integer teamSize;
 
 		private Report(String id, String type, String occurredAt, String source, Integer kc, List<Item> items,
 			String lootType, Long totalValue, Boolean screenshot, String previous, Boolean duplicate)
+		{
+			this(id, type, occurredAt, source, kc, items, lootType, totalValue, screenshot, previous, duplicate, null);
+		}
+
+		private Report(String id, String type, String occurredAt, String source, Integer kc, List<Item> items,
+			String lootType, Long totalValue, Boolean screenshot, String previous, Boolean duplicate, Integer xp)
+		{
+			this(id, type, occurredAt, source, kc, items, lootType, totalValue, screenshot, previous, duplicate, xp, null, null);
+		}
+
+		private Report(String id, String type, String occurredAt, String source, Integer kc, List<Item> items,
+			String lootType, Long totalValue, Boolean screenshot, String previous, Boolean duplicate, Integer xp,
+			Long durationMs, Integer teamSize)
 		{
 			this.id = id;
 			this.type = type;
@@ -154,11 +192,27 @@ final class Api
 			this.screenshot = screenshot;
 			this.previous = previous;
 			this.duplicate = duplicate;
+			this.xp = xp;
+			this.durationMs = durationMs;
+			this.teamSize = teamSize;
 		}
 
 		static Report kill(String id, String occurredAt, String boss, int kc)
 		{
-			return new Report(id, "kill", occurredAt, boss, kc, null, null, null, null, null, null);
+			return kill(id, occurredAt, boss, kc, null);
+		}
+
+		/** {@code teamSize}: players in the instance, or null outside one. */
+		static Report kill(String id, String occurredAt, String boss, int kc, Integer teamSize)
+		{
+			return new Report(id, "kill", occurredAt, boss, kc, null, null, null, null, null, null, null, null, teamSize);
+		}
+
+		/** This kill with the fight's length (the "Fight duration" line that came with it). */
+		Report withDuration(long ms)
+		{
+			return new Report(id, type, occurredAt, source, kc, items, lootType, totalValue, screenshot, previous, duplicate,
+				xp, ms, teamSize);
 		}
 
 		/** A pet; {@code name} is null when the plugin couldn't tell which (see OcagePlugin.petName). */
@@ -186,10 +240,16 @@ final class Api
 			return new Report(id, "ca", occurredAt, tier, null, null, null, null, null, previous, null);
 		}
 
+		static Report xp(String id, String occurredAt, String skill, int xp)
+		{
+			return new Report(id, "xp", occurredAt, skill, null, null, null, null, null, null, null, xp);
+		}
+
 		/** This loot report with only {@code kept} items (the rest of its fields unchanged). */
 		Report withItems(List<Item> kept)
 		{
-			return new Report(id, type, occurredAt, source, kc, kept, lootType, totalValue, screenshot, previous, duplicate);
+			return new Report(id, type, occurredAt, source, kc, kept, lootType, totalValue, screenshot, previous, duplicate,
+				xp, durationMs, teamSize);
 		}
 	}
 

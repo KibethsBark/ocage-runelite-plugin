@@ -40,11 +40,14 @@ import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Player;
+import net.runelite.api.Skill;
+import net.runelite.api.WorldView;
 import net.runelite.api.events.AccountHashChanged;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.PlayerChanged;
+import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
@@ -114,7 +117,7 @@ import okhttp3.OkHttpClient;
 public class OcagePlugin extends Plugin
 {
 	/** Sent to the bot in each request. Keep in step with build.gradle's version. */
-	static final String VERSION = "1.0.4";
+	static final String VERSION = "1.0.5";
 
 	/** "Your Vorkath kill count is: 123." and friends (chest, completion, success, harvest). */
 	private static final Pattern KC_PATTERN = Pattern.compile(
@@ -123,10 +126,58 @@ public class OcagePlugin extends Plugin
 	/** "Your completed Chambers of Xeric count is: 12." / "Your subdued Wintertodt count is: 400." */
 	private static final Pattern COMPLETED_PATTERN = Pattern.compile(
 		"Your (?:completed|subdued) (?<boss>.+?) count is: ?(?<kc>[\\d,]+)\\b", Pattern.CASE_INSENSITIVE);
+	/**
+	 * "Your completion count for TzHaar-Ket-Rak's Third Challenge is: 4."
+	 * Each challenge (First to Sixth) is its own boss.
+	 */
+	static final Pattern COMPLETION_FOR_PATTERN = Pattern.compile(
+		"Your completion count for (?<boss>.+?) is: ?(?<kc>[\\d,]+)\\b", Pattern.CASE_INSENSITIVE);
 	/** "You have completed 12 hard Treasure Trails." (one clue: "1 hard Treasure Trail."). */
 	static final Pattern CLUE_PATTERN = Pattern.compile(
 		"You have completed (?<count>[\\d,]+) (?<tier>beginner|easy|medium|hard|elite|master) Treasure Trails?\\b",
 		Pattern.CASE_INSENSITIVE);
+
+	/**
+	 * The Doom of Mokhaiotl: "Delve level 3 duration: …", and past level 8
+	 * "Delve level 8+(12) duration: …" (checked in game), read as 12.
+	 */
+	static final Pattern DELVE_PATTERN = Pattern.compile(
+		"Delve level:? ?(?<level>\\d+)(?:\\+ ?\\((?<deep>\\d+)\\))?", Pattern.CASE_INSENSITIVE);
+
+	/**
+	 * The Fortis Colosseum, once a wave is cleared: "Wave 4 completed! Wave
+	 * duration: 1:23.4" (checked in game). Anchored to the start, so other chat that mentions
+	 * a wave doesn't count.
+	 */
+	static final Pattern COLOSSEUM_WAVE_PATTERN = Pattern.compile(
+		"^Wave (?<wave>\\d+) completed!", Pattern.CASE_INSENSITIVE);
+
+	/**
+	 * The Inferno and the Fight Caves, as the next wave starts: "Wave: 35".
+	 * Their "Wave completed in: 1:23.45" names no wave, so this one says
+	 * wave 34 was cleared. Only read inside them (by map region), since
+	 * other content may say "Wave:" too.
+	 */
+	static final Pattern TZHAAR_WAVE_PATTERN = Pattern.compile("^Wave: ?(?<wave>\\d+)\\b", Pattern.CASE_INSENSITIVE);
+	static final int INFERNO_REGION = 9043;
+
+	/**
+	 * "Congratulations, you've completed a hard combat task: Mirror Image
+	 * (5 points)." Also shown for a task the player has set to repeat, so
+	 * it's reported every time, as a kill of "CA: Mirror Image".
+	 */
+	static final Pattern CA_TASK_PATTERN = Pattern.compile(
+		"Congratulations, you.?ve completed an? (?<tier>[a-z]+) combat task: (?<task>.+?) \\((?<points>\\d+) points?\\)",
+		Pattern.CASE_INSENSITIVE);
+
+	/**
+	 * "Fight duration: 2:29.4" (or "2:29" without the game's precise
+	 * timings; hours when there are any), with or without a personal best
+	 * after it. Names no boss: {@link KillTimes} pairs it with the kill.
+	 */
+	static final Pattern FIGHT_DURATION_PATTERN = Pattern.compile(
+		"Fight duration: ?(?:(?<h>\\d+):)?(?<m>\\d+):(?<s>\\d{2})(?:\\.(?<f>\\d+))?", Pattern.CASE_INSENSITIVE);
+	static final int FIGHT_CAVES_REGION = 9551;
 
 	/** Needs the in-game setting "Collection log - New addition notification". */
 	static final Pattern CLOG_PATTERN = Pattern.compile("New item added to your collection log: (?<item>.+)");
@@ -215,6 +266,10 @@ public class OcagePlugin extends Plugin
 	private volatile boolean queueDirty;
 	private volatile boolean flushing;
 	private volatile Api.Rules rules;
+	/** Kills waiting for their "Fight duration" line (speed tasks, 1.0.5). */
+	private final KillTimes killTimes = new KillTimes();
+	/** Client thread only: when to report XP for an advent door (see XpTracker). */
+	private final XpTracker xpTracker = new XpTracker();
 	/** When the rules were last asked for (success or not) — so a failure isn't retried every tick. */
 	private volatile long rulesRequestedAt;
 	/** When the current rules arrived. */
@@ -331,6 +386,7 @@ public class OcagePlugin extends Plugin
 	protected void shutDown()
 	{
 		flushTask.cancel(false);
+		enqueueAll(killTimes.flush());
 		saveQueue();
 		running = false;
 		clientToolbar.removeNavigation(navButton);
@@ -409,6 +465,14 @@ public class OcagePlugin extends Plugin
 		}
 		else if (event.getGameState() == GameState.LOGIN_SCREEN)
 		{
+			// A kill still waiting for its duration, and XP gained since the last report,
+			// sent for the account logging out (enqueue needs it still set).
+			enqueueAll(killTimes.flush());
+			for (Map.Entry<String, Integer> xp : xpTracker.unsent(System.currentTimeMillis()).entrySet())
+			{
+				enqueue(Api.Report.xp(newId(), Instant.now().toString(), xp.getKey(), xp.getValue()));
+			}
+			xpTracker.reset();
 			caPoints = 0;
 			accountHash = null;
 			rsn = null;
@@ -544,14 +608,49 @@ public class OcagePlugin extends Plugin
 		{
 			return;
 		}
-		Matcher matcher = KC_PATTERN.matcher(message);
-		if (!matcher.find())
+		Integer delve = delveLevel(message);
+		if (delve != null)
 		{
-			matcher = COMPLETED_PATTERN.matcher(message);
-			if (!matcher.find())
+			// A kill of "Delve level N": the bot counts it for a task on that level or a shallower one.
+			enqueue(Api.Report.kill(newId(), Instant.now().toString(), "Delve level " + delve, delve));
+			return;
+		}
+		Integer wave = colosseumWave(message);
+		if (wave != null)
+		{
+			// A kill of "Colosseum wave N": the bot counts it for a task on that wave or an earlier one.
+			enqueue(Api.Report.kill(newId(), Instant.now().toString(), "Colosseum wave " + wave, wave));
+			return;
+		}
+		String caTask = caTask(message);
+		if (caTask != null)
+		{
+			// A kill of "CA: <task>": an advent door counting that combat task completes.
+			enqueue(Api.Report.kill(newId(), Instant.now().toString(), "CA: " + caTask, 1));
+			return;
+		}
+		Long duration = fightDurationMs(message);
+		if (duration != null)
+		{
+			enqueueAll(killTimes.duration(duration, client.getTickCount()));
+			return;
+		}
+		Integer cleared = clearedTzhaarWave(message);
+		if (cleared != null)
+		{
+			String place = tzhaarWaves(client.getTopLevelWorldView() == null
+				? null : client.getTopLevelWorldView().getMapRegions());
+			if (place != null)
 			{
-				return;
+				// A kill of "Inferno wave N": the bot counts it for a task on that wave or an earlier one.
+				enqueue(Api.Report.kill(newId(), Instant.now().toString(), place + " wave " + cleared, cleared));
 			}
+			return;
+		}
+		Matcher matcher = killCount(message);
+		if (matcher == null)
+		{
+			return;
 		}
 		int kc;
 		try
@@ -562,7 +661,158 @@ public class OcagePlugin extends Plugin
 		{
 			return;
 		}
-		enqueue(Api.Report.kill(newId(), Instant.now().toString(), matcher.group("boss"), kc));
+		// Held a tick or two for the "Fight duration" line that may follow it (KillTimes).
+		enqueueAll(killTimes.kill(
+			Api.Report.kill(newId(), Instant.now().toString(), matcher.group("boss"), kc, teamSize()), client.getTickCount()));
+	}
+
+	@Subscribe
+	public void onGameTick(GameTick event)
+	{
+		enqueueAll(killTimes.tick(client.getTickCount()));
+	}
+
+	/**
+	 * Players in the instance the local player is in (a duo at Yama is 2),
+	 * or null outside an instance, where anyone nearby could be counted.
+	 */
+	private Integer teamSize()
+	{
+		WorldView view = client.getTopLevelWorldView();
+		if (view == null || !view.isInstance())
+		{
+			return null;
+		}
+		int players = 0;
+		for (Player player : view.players())
+		{
+			if (player != null)
+			{
+				players++;
+			}
+		}
+		return players > 0 ? players : null;
+	}
+
+	/** The task a "you've completed a … combat task: <task> (N points)" message names, or null. */
+	static String caTask(String message)
+	{
+		Matcher matcher = CA_TASK_PATTERN.matcher(message);
+		return matcher.find() ? matcher.group("task").trim() : null;
+	}
+
+	/** The fight's length a "Fight duration: 2:29.4" line gives, in milliseconds, or null. */
+	static Long fightDurationMs(String message)
+	{
+		Matcher matcher = FIGHT_DURATION_PATTERN.matcher(message);
+		if (!matcher.find())
+		{
+			return null;
+		}
+		try
+		{
+			long hours = matcher.group("h") == null ? 0 : Long.parseLong(matcher.group("h"));
+			long minutes = Long.parseLong(matcher.group("m"));
+			long seconds = Long.parseLong(matcher.group("s"));
+			String fraction = matcher.group("f") == null ? "" : matcher.group("f");
+			long millis = fraction.isEmpty() ? 0 : Long.parseLong((fraction + "00").substring(0, 3));
+			return ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis;
+		}
+		catch (NumberFormatException e)
+		{
+			return null;
+		}
+	}
+
+	/** A matcher on a kill-count message, with groups "boss" and "kc", or null if it isn't one. */
+	static Matcher killCount(String message)
+	{
+		for (Pattern pattern : new Pattern[]{KC_PATTERN, COMPLETED_PATTERN, COMPLETION_FOR_PATTERN})
+		{
+			Matcher matcher = pattern.matcher(message);
+			if (matcher.find())
+			{
+				return matcher;
+			}
+		}
+		return null;
+	}
+
+	/** The wave a "Wave: N" message says was just cleared (N - 1), or null: wave 1, or another message. */
+	static Integer clearedTzhaarWave(String message)
+	{
+		Matcher matcher = TZHAAR_WAVE_PATTERN.matcher(message);
+		if (!matcher.find())
+		{
+			return null;
+		}
+		try
+		{
+			int wave = Integer.parseInt(matcher.group("wave"));
+			return wave > 1 ? wave - 1 : null;
+		}
+		catch (NumberFormatException e)
+		{
+			return null;
+		}
+	}
+
+	/** "Inferno" or "Fight Caves" when the map regions loaded are inside one, or null. */
+	static String tzhaarWaves(int[] regions)
+	{
+		if (regions == null)
+		{
+			return null;
+		}
+		for (int region : regions)
+		{
+			if (region == INFERNO_REGION)
+			{
+				return "Inferno";
+			}
+			if (region == FIGHT_CAVES_REGION)
+			{
+				return "Fight Caves";
+			}
+		}
+		return null;
+	}
+
+	/** The Colosseum wave a "Wave N completed!" message names, or null. */
+	static Integer colosseumWave(String message)
+	{
+		Matcher matcher = COLOSSEUM_WAVE_PATTERN.matcher(message);
+		if (!matcher.find())
+		{
+			return null;
+		}
+		try
+		{
+			return Integer.parseInt(matcher.group("wave"));
+		}
+		catch (NumberFormatException e)
+		{
+			return null;
+		}
+	}
+
+	/** The delve level a "Delve level: N" message names, or null. */
+	static Integer delveLevel(String message)
+	{
+		Matcher matcher = DELVE_PATTERN.matcher(message);
+		if (!matcher.find())
+		{
+			return null;
+		}
+		try
+		{
+			String deep = matcher.group("deep");
+			return Integer.parseInt(deep != null ? deep : matcher.group("level"));
+		}
+		catch (NumberFormatException e)
+		{
+			return null;
+		}
 	}
 
 	/**
@@ -969,9 +1219,75 @@ public class OcagePlugin extends Plugin
 		if (changed)
 		{
 			rules = null;
+			xpTracker.reset();  // the new account's XP starts from its own; its rules relist the skills
 			executor.execute(this::refresh);
 			promptCaSync();
 		}
+	}
+
+	/**
+	 * A skill's XP changed (also sent for every skill at login). Reported
+	 * only for a skill an open advent door counts (the rules' xp_skills).
+	 */
+	@Subscribe
+	public void onStatChanged(StatChanged event)
+	{
+		if (accountHash == null || currentKey() == null)
+		{
+			return;
+		}
+		Integer due = xpTracker.update(event.getSkill().getName(), event.getXp(), System.currentTimeMillis());
+		if (due != null)
+		{
+			enqueue(Api.Report.xp(newId(), Instant.now().toString(), event.getSkill().getName(), due));
+		}
+	}
+
+	/**
+	 * Client thread: new rules for `hash`. Starts or stops tracking skills,
+	 * and reads the XP of any listed skill now: its first report is the
+	 * door's start, and a skill may not change again for a while.
+	 */
+	private void applyXpSkills(String hash, Api.Rules value)
+	{
+		if (hash == null || !hash.equals(accountHash) || value != rules)
+		{
+			return;  // another account's, or already replaced
+		}
+		xpTracker.setSkills(value.xpSkills);
+		checkXp();
+	}
+
+	/** Client thread: reports any listed skill that's due, by XP gained or time waited. */
+	private void checkXp()
+	{
+		if (!xpTracker.tracking() || client.getGameState() != GameState.LOGGED_IN || currentKey() == null)
+		{
+			return;
+		}
+		long now = System.currentTimeMillis();
+		for (String name : xpTracker.skills())
+		{
+			Skill skill = skillNamed(name);
+			Integer due = skill == null ? null : xpTracker.update(name, client.getSkillExperience(skill), now);
+			if (due != null)
+			{
+				enqueue(Api.Report.xp(newId(), Instant.now().toString(), name, due));
+			}
+		}
+	}
+
+	/** RuneLite's Skill for a name the bot sent ("Runecraft"), or null for one this client doesn't know. */
+	static Skill skillNamed(String name)
+	{
+		for (Skill skill : Skill.values())
+		{
+			if (skill.getName().equalsIgnoreCase(name))
+			{
+				return skill;
+			}
+		}
+		return null;
 	}
 
 	/** The local player has loaded (or changed): its name is known now. */
@@ -1102,6 +1418,7 @@ public class OcagePlugin extends Plugin
 			{
 				rulesReceivedAt = System.currentTimeMillis();
 				rules = value;
+				clientThread.invokeLater(() -> applyXpSkills(hash, value));
 			}
 
 			@Override
@@ -1260,6 +1577,14 @@ public class OcagePlugin extends Plugin
 
 	// -- Queue and upload (background thread) ------------------------------------
 
+	private void enqueueAll(List<Api.Report> reports)
+	{
+		for (Api.Report report : reports)
+		{
+			enqueue(report);
+		}
+	}
+
 	private void enqueue(Api.Report report)
 	{
 		if (currentKey() == null)
@@ -1370,6 +1695,10 @@ public class OcagePlugin extends Plugin
 		else if (currentKey() != null && System.currentTimeMillis() - meRequestedAt >= meIntervalMs)
 		{
 			refreshMe();
+		}
+		if (xpTracker.tracking())
+		{
+			clientThread.invokeLater(this::checkXp);  // an hour's small gain, sent even if no XP drop comes
 		}
 		if (System.currentTimeMillis() >= nextFlushAt)
 		{
@@ -1571,6 +1900,10 @@ public class OcagePlugin extends Plugin
 			allowed.addAll(rules.clogItemIds);
 		}
 		Set<String> bingo = bingoNames(rules);
+		if (rules.itemNames != null)
+		{
+			bingo.addAll(rules.itemNames);  // advent items (already lower-case), kept the same way
+		}
 		List<Api.Item> kept = new ArrayList<>();
 		for (Api.Item item : report.items)
 		{
@@ -1581,11 +1914,28 @@ public class OcagePlugin extends Plugin
 			}
 		}
 		long total = report.totalValue == null ? 0 : report.totalValue;
-		if (kept.isEmpty() && total < rules.minValue)
+		if (kept.isEmpty() && total < rules.minValue && !countedSource(report.source, rules))
 		{
 			return null;
 		}
 		return report.withItems(kept);
+	}
+
+	/** Whether an advent door counts every entry of this loot's source ("Supply crate"). */
+	private static boolean countedSource(String source, Api.Rules rules)
+	{
+		if (source == null || rules.lootSources == null)
+		{
+			return false;
+		}
+		for (String wanted : rules.lootSources)
+		{
+			if (source.equalsIgnoreCase(wanted))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
